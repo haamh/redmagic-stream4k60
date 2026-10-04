@@ -181,7 +181,7 @@ fun FilterEditorScreen(
                         AddFilterButton(listOf(
                             Triple(AudioFilterType.GAIN.label, if (hasGain) "This source already has a Gain filter." else "Increase or reduce this source's level.", !hasGain),
                             Triple(AudioFilterType.NOISE_GATE.label,
-                            if (hasGate) "This source already has a noise gate." else "Mute background noise between words.", !hasGate))) {
+                            if (hasGate) "This source already has a noise gate." else "Mute background noise between words.", !hasGate))) { index ->
                             // The selected menu entry is mapped by its index: Gain first, Noise Gate second.
                             val type = if (index == 0) AudioFilterType.GAIN else AudioFilterType.NOISE_GATE
                             if (type == AudioFilterType.GAIN || !audio.any { it.type == AudioFilterType.NOISE_GATE }) {

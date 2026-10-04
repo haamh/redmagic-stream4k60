@@ -310,7 +310,7 @@ class UvcCaptureSession(
         }
     }
 
-    fun stop() {
+    fun stop(deviceGone: Boolean = false) {
         if (!running.getAndSet(false) && isoHandle == 0L && bulkHandle == 0L && streamInterface == null && surface == null && decoder == null) return
         val h = isoHandle; isoHandle = 0L
         // What went wrong on the bus up to now (often right before the device dropped off), before the stream is gone.

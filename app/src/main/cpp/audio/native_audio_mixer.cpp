@@ -221,14 +221,32 @@ bool NativeAudioMixer::openMonitor(){
     if(r!=AAUDIO_OK||!monitorStream_){monitorStream_=nullptr;std::lock_guard<std::mutex>l(monitorInfoMutex_);monitorInfo_=std::string("monitor output could not open: ")+AAudio_convertResultToText(r);return false;}
     monitorActualFormat_=AAudioStream_getFormat(monitorStream_);
     if(monitorScratch_.size()<static_cast<size_t>(8192)*2)monitorScratch_.resize(static_cast<size_t>(8192)*2);
+    // AAudio's callback is already the realtime path. Keep its internal output queue to two device bursts so a
+    // large default buffer cannot silently turn a ~10 ms pipeline into hundreds of milliseconds.
+    const int burst=AAudioStream_getFramesPerBurst(monitorStream_);
+    const int capacity=AAudioStream_getBufferCapacityInFrames(monitorStream_);
+    if(burst>0&&capacity>0){
+        const int target=std::min(capacity,burst*2);
+        if(target>0)AAudioStream_setBufferSizeInFrames(monitorStream_,target);
+    }
     {
-        const int rate=AAudioStream_getSampleRate(monitorStream_);const int f=monitorActualFormat_;
+        const int rate=AAudioStream_getSampleRate(monitorStream_);
+        const int hwRate=AAudioStream_getHardwareSampleRate(monitorStream_);
+        const int f=monitorActualFormat_;
+        const int hwFmt=AAudioStream_getHardwareFormat(monitorStream_);
         const char* fname=f==AAUDIO_FORMAT_PCM_I16?"16-bit":f==AAUDIO_FORMAT_PCM_I24_PACKED?"24-bit":f==AAUDIO_FORMAT_PCM_I32?"32-bit":"32-bit float";
-        std::lock_guard<std::mutex>l(monitorInfoMutex_);
+        const char* hwName=hwFmt==AAUDIO_FORMAT_PCM_I16?"16-bit":hwFmt==AAUDIO_FORMAT_PCM_I24_PACKED?"24-bit":hwFmt==AAUDIO_FORMAT_PCM_I32?"32-bit":"32-bit float";
+        const char* perf=AAudioStream_getPerformanceMode(monitorStream_)==AAUDIO_PERFORMANCE_MODE_LOW_LATENCY?"low-latency":"non-low-latency";
         const bool exclusive=AAudioStream_getSharingMode(monitorStream_)==AAUDIO_SHARING_MODE_EXCLUSIVE;
-        monitorInfo_=std::to_string(rate)+" Hz, "+fname+", "+(exclusive?"direct (exclusive): no Android mixing, volume or effects":
-            (bitPerfect?"shared (another app holds the direct output, so Android mixes this one)":"shared through Android's mixer"))+
-            (rate!=sampleRate_?"; Android resamples it, not lossless":"");
+        const bool mmap=AAudioStream_isMMapUsed(monitorStream_);
+        const int buffer=AAudioStream_getBufferSizeInFrames(monitorStream_);
+        const int cb=AAudioStream_getFramesPerDataCallback(monitorStream_);
+        monitorInfo_=std::to_string(rate)+" Hz, "+fname+", "+(exclusive?"direct (exclusive)":"shared")+
+            ", "+perf+", MMAP "+(mmap?"yes":"no")+
+            ", buffer "+std::to_string(buffer)+" frames, burst "+std::to_string(burst)+" frames, callback "+std::to_string(cb)+" frames"+
+            "; hardware "+std::to_string(hwRate)+" Hz "+hwName+
+            (rate!=sampleRate_||hwRate!=sampleRate_?"; sample-rate conversion is present":"");
+        if(!exclusive&&bitPerfect)monitorInfo_+="; WARNING: lossless/direct output was not granted";
     }
     if(AAudioStream_requestStart(monitorStream_)!=AAUDIO_OK){closeMonitor();return false;}
     monitorLost_=false;return true;}

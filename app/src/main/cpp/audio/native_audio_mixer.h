@@ -111,7 +111,6 @@ private:
     void mixLoop();
     static void applyGate(Input::Gate& gate, float* stereo, size_t frames, float levelDecay);
     static void applyGain(const Input::Gain& gain, float* stereo, size_t frames);
-    bool setInputGain(const std::string& sourceId, float gainDb);
     bool openInput(Input& input);
     std::string lastInputError_; // guarded by inputsMutex_ (openInput runs under it)
     void closeInput(Input& input);

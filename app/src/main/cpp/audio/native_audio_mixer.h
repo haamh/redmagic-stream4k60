@@ -25,6 +25,7 @@ public:
     // Per-input noise gate on the 48 kHz program bus. Thresholds in dBFS; times in milliseconds.
     bool setInputGate(const std::string& sourceId, bool enabled, float openDb, float closeDb, float attackMs, float holdMs, float releaseMs);
     // Per-input gain filter on the 48 kHz program bus. Gain is in dB and clamped to -30..+30 dB.
+    bool setInputGain(const std::string& sourceId, float gainDb);
     void stop();
     void setMonitorVolume(float volume);
     void setMonitorMuted(bool muted);

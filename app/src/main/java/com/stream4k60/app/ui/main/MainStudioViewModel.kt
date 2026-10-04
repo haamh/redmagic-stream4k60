@@ -590,7 +590,7 @@ private fun transitionCode(name:String):Int=when(name){"Cut"->0;else->1}
    val j=sourceAudioSettings(src.configJson)
    AudioInputRoute(id,-1,j.optDouble("volume",1.0).toFloat().coerceIn(0f,2f),j.optDouble("balance",0.0).toFloat().coerceIn(-1f,1f),j.optBoolean("muted",false),
     runCatching{AudioMonitoring.valueOf(j.optString("monitoring","MONITOR_AND_OUTPUT"))}.getOrDefault(AudioMonitoring.MONITOR_AND_OUTPUT),
-    j.optInt("syncOffsetMs",0).coerceIn(-2000,2000),j.optBoolean("solo",false),AudioFilterChain.noiseGate(src.configJson))
+    j.optInt("syncOffsetMs",0).coerceIn(-2000,2000),j.optBoolean("solo",false),AudioFilterChain.noiseGate(src.configJson),AudioFilterChain.gain(src.configJson))
   }.getOrNull()
  }
  private fun audioRoutes(): List<AudioInputRoute> = renderedItems().filter { (it.type.equals("AUDIO_INPUT", true) || it.type.equals("USB_CAPTURE", true)) && com.stream4k60.app.engine.SourceReferences.targetOf(it.configJson) == null && UsbAudioSources.mixerInputId(it) == null }.mapNotNull { src ->
@@ -602,14 +602,14 @@ private fun transitionCode(name:String):Int=when(name){"Cut"->0;else->1}
     sourceId=if(isCaptureCard)"usb_audio_${src.id}" else src.id, deviceId=id, volume=j.optDouble("volume",1.0).toFloat().coerceIn(0f,2f), balance=j.optDouble("balance",0.0).toFloat().coerceIn(-1f,1f), muted=j.optBoolean("muted",false),
     monitoring=runCatching{AudioMonitoring.valueOf(j.optString("monitoring","MONITOR_AND_OUTPUT"))}.getOrDefault(AudioMonitoring.MONITOR_AND_OUTPUT),
     syncOffsetMs=j.optInt("syncOffsetMs",0).coerceIn(-2000,2000), solo=j.optBoolean("solo",false),
-    noiseGate=AudioFilterChain.noiseGate(src.configJson)
+    noiseGate=AudioFilterChain.noiseGate(src.configJson),AudioFilterChain.gain(src.configJson)
    )
   }.getOrNull()
  }
  private fun mediaAudioRoutes():List<AudioInputRoute> = renderedItems().filter{it.type.equals("MEDIA",true)&&com.stream4k60.app.engine.SourceReferences.targetOf(it.configJson)==null}.mapNotNull{src->
   runCatching{
    val j=sourceSettings(src.configJson);val audioId="media_audio_${src.id}"
-   AudioInputRoute(audioId,-1,j.optDouble("volume",1.0).toFloat().coerceIn(0f,2f),j.optDouble("balance",0.0).toFloat().coerceIn(-1f,1f),j.optBoolean("muted",!j.optBoolean("audioEnabled",true)),runCatching{AudioMonitoring.valueOf(j.optString("monitoring","OUTPUT_ONLY"))}.getOrDefault(AudioMonitoring.OUTPUT_ONLY),j.optInt("syncOffsetMs",0).coerceIn(-2000,2000),j.optBoolean("solo",false),AudioFilterChain.noiseGate(src.configJson))
+   AudioInputRoute(audioId,-1,j.optDouble("volume",1.0).toFloat().coerceIn(0f,2f),j.optDouble("balance",0.0).toFloat().coerceIn(-1f,1f),j.optBoolean("muted",!j.optBoolean("audioEnabled",true)),runCatching{AudioMonitoring.valueOf(j.optString("monitoring","OUTPUT_ONLY"))}.getOrDefault(AudioMonitoring.OUTPUT_ONLY),j.optInt("syncOffsetMs",0).coerceIn(-2000,2000),j.optBoolean("solo",false),AudioFilterChain.noiseGate(src.configJson),AudioFilterChain.gain(src.configJson))
   }.getOrNull()
  }
  /** An Audio Output source wins; otherwise the monitoring device from Settings → Audio (-1 = Android default). */

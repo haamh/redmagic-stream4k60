@@ -57,7 +57,7 @@ inline bool reapOutstanding(int fd, std::atomic<int>& inFlight) {
         void* context = nullptr;
         if (ioctl(fd, USBDEVFS_REAPURBNDELAY, &context) == 0) { inFlight--; continue; }
         if (errno != EAGAIN && errno != EINTR) break; // device gone: the kernel has already dropped its URBs
-        struct pollfd pfd{fd, POLLIN, 0};
+        struct pollfd pfd{fd, POLLOUT, 0};
         poll(&pfd, 1, 5);
         waitedMs += 5;
     }

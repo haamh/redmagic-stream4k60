@@ -25,7 +25,9 @@ data class AudioInputRoute(
     val syncOffsetMs: Int = 0,
     val solo: Boolean = false,
     /** Null when the source has no enabled noise gate. */
-    val noiseGate: com.stream4k60.app.engine.NoiseGateConfig? = null
+    val noiseGate: com.stream4k60.app.engine.NoiseGateConfig? = null,
+    /** Null when the source has no enabled Gain filter. */
+    val gain: com.stream4k60.app.engine.GainConfig? = null
 )
 
 enum class SampleRate {

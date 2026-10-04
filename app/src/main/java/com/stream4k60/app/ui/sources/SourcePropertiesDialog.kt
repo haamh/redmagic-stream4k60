@@ -126,11 +126,50 @@ fun SourcePropertiesDialog(
             .onSuccess { set("file", uri.toString()); pickerError = null }
             .onFailure { pickerError = "Android did not grant lasting access to this file. Choose it again and allow document access." }
     }
+
+    fun rememberImageUri(uri: Uri) {
+        coroutineScope.launch(Dispatchers.IO) {
+            val persisted = runCatching {
+                context.contentResolver.takePersistableUriPermission(uri, android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                true
+            }.getOrDefault(false)
+            if (persisted) {
+                withContext(kotlinx.coroutines.Dispatchers.Main) {
+                    set("file", uri.toString())
+                    set("url", "")
+                    pickerError = null
+                }
+                return@launch
+            }
+            val mime = runCatching { context.contentResolver.getType(uri) }.getOrNull().orEmpty()
+            val ext = android.webkit.MimeTypeMap.getSingleton().getExtensionFromMimeType(mime)
+                ?: uri.lastPathSegment?.substringAfterLast('.', "").takeIf { it.length in 2..8 }
+                ?: "bin"
+            val dir = java.io.File(context.filesDir, "source_assets")
+            val target = java.io.File(dir, "image_" + java.util.UUID.randomUUID().toString() + "." + ext)
+            val copied = runCatching {
+                dir.mkdirs()
+                context.contentResolver.openInputStream(uri)?.use { input ->
+                    target.outputStream().use { output -> input.copyTo(output) }
+                } ?: error("The selected document could not be opened.")
+                target.length() > 0L
+            }.isSuccess
+            withContext(kotlinx.coroutines.Dispatchers.Main) {
+                if (copied) {
+                    set("file", target.absolutePath)
+                    set("url", "")
+                    pickerError = null
+                } else {
+                    pickerError = "The selected image could not be copied from Android's document provider. Choose another image file."
+                }
+            }
+        }
+    }
     fun updateNumberValidity(key: String, valid: Boolean) {
         invalidNumberFields = if (valid) invalidNumberFields - key else invalidNumberFields + key
     }
 
-    val imagePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri -> uri?.let(::rememberUri) }
+    val imagePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri -> uri?.let(::rememberImageUri) }
     val mediaPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) {
             val granted = runCatching { context.contentResolver.takePersistableUriPermission(uri, android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION) }.isSuccess
@@ -199,6 +238,12 @@ fun SourcePropertiesDialog(
                         Text("Image file", style = MaterialTheme.typography.labelLarge)
                         Text(str("file", "No image selected"), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         OutlinedButton(onClick = { imagePicker.launch(arrayOf("image/*")) }) { Text("Choose image…") }
+                        Field("Image URL", str("url")) { value ->
+                            updateValues { settings ->
+                                settings.put("url", value)
+                                if (value.isNotBlank()) settings.put("file", "")
+                            }
+                        }
                         val measured by com.stream4k60.app.engine.SourceNativeSizes.sizes.collectAsState()
                         measured[source.id]?.let { (w, h) -> Text("Image size: $w × $h", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
                         CheckField("Unload image when not showing", bool("unloadWhenNotShowing", bool("unload", false)), "Frees its memory while hidden; it loads again when shown.") { set("unloadWhenNotShowing", it) }
@@ -712,10 +757,10 @@ private fun validateSourceConfig(
     usbVideo: List<com.stream4k60.app.engine.UsbDeviceInfo>
 ): String? = when (type) {
     "IMAGE" -> {
-        val path = settings.optString("file").ifBlank { settings.optString("path") }
+        val path = settings.optString("url").ifBlank { settings.optString("file").ifBlank { settings.optString("path") } }
         when {
-            path.isBlank() -> "Choose an image before applying this source."
-            !canReadSourceUri(context, path) -> "The selected image cannot be opened. Choose it again or relink the file."
+            path.isBlank() -> "Choose an image file or enter an image URL before applying this source."
+            !canReadSourceUri(context, path, allowNetwork = true) -> "The selected image cannot be opened. Choose another image file or check the image URL."
             else -> null
         }
     }
@@ -803,7 +848,7 @@ private fun validateSourceConfig(
 private fun canReadSourceUri(context: Context, path: String, allowNetwork: Boolean = false): Boolean {
     val uri = runCatching { Uri.parse(path) }.getOrNull() ?: return false
     return when (uri.scheme?.lowercase()) {
-        "content" -> runCatching { context.contentResolver.openAssetFileDescriptor(uri, "r")?.use { true } ?: false }.getOrDefault(false)
+        "content" -> runCatching { context.contentResolver.openInputStream(uri)?.use { true } ?: false }.getOrDefault(false)
         "file" -> uri.path?.let { java.io.File(it).isFile } == true
         "http", "https" -> allowNetwork && !uri.host.isNullOrBlank()
         null, "" -> java.io.File(path).isFile

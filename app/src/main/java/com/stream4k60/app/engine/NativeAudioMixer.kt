@@ -10,7 +10,7 @@ object NativeAudioMixer {
         fun onMixed(buffer: ByteBuffer, ptsUs: Long, frames: Int, channels: Int, sampleRate: Int)
     }
 
-    external fun start(callback: Callback, sampleRate: Int, channels: Int, blockFrames: Int, monitorDeviceId: Int, monitorEnabled: Boolean): Long
+    external fun start(callback: Callback, sampleRate: Int, channels: Int, blockFrames: Int, monitorDeviceId: Int, monitorEnabled: Boolean, monitorFormat: Int, monitorBitPerfect: Boolean): Long
     external fun addInput(handle: Long, sourceId: String, deviceId: Int, initialVolume: Float, balance: Float, muted: Boolean, monitoring: Int, syncOffsetMs: Int): Boolean
     external fun addExternalInput(handle: Long, sourceId: String, initialVolume: Float, balance: Float, muted: Boolean, monitoring: Int, syncOffsetMs: Int, solo: Boolean): Boolean
     external fun pushExternalPcm(handle: Long, sourceId: String, pcm: ByteBuffer, frames: Int, channels: Int, sampleRate: Int, ptsUs: Long): Boolean

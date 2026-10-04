@@ -20,6 +20,8 @@ object NativeAudioGraph {
     private var externalConfigs = emptyList<AudioInputRoute>()
     private var monitorDeviceId = -1
     private var monitorEnabled = false
+    private var monitorFormat = 2
+    private var monitorBitPerfect = false
     private val callback = object : NativeAudioMixer.Callback {
         override fun onMixed(buffer: ByteBuffer, ptsUs: Long, frames: Int, channels: Int, sampleRate: Int) {
             // Consumers must copy or enqueue quickly. Native capture/mixing remains independent of UI.
@@ -36,21 +38,29 @@ object NativeAudioGraph {
         playbackRoute: AudioInputRoute?,
         monitorDevice: Int?,
         monitor: Boolean,
-        externalRoutes: List<AudioInputRoute> = emptyList()
+        externalRoutes: List<AudioInputRoute> = emptyList(),
+        monitorFormat: Int = 2,
+        monitorBitPerfect: Boolean = false
     ): Map<String, String> {
         val failures = mutableMapOf<String, String>()
         synchronized(lock) {
             val newKeys = routes.map { RouteKey(it.sourceId, it.deviceId) }.toSet()
             val external = listOfNotNull(playbackRoute) + externalRoutes.filterNot { it.sourceId == NativeAudioBridge.PLAYBACK_SOURCE_ID }
             val nextKeys = newKeys + external.map { RouteKey(it.sourceId, -1) }
-            val monitorChanged = monitorDevice.orDefault() != monitorDeviceId || monitor != monitorEnabled
+            val monitorChanged = monitorDevice.orDefault() != monitorDeviceId ||
+                monitor != monitorEnabled || monitorFormat != this.monitorFormat || monitorBitPerfect != this.monitorBitPerfect
             if (handle == 0L || monitorChanged) {
                 if (handle != 0L) stopLocked()
-                handle = NativeAudioMixer.start(callback, 48_000, 2, 480, monitorDevice.orDefault(), monitor)
+                handle = NativeAudioMixer.start(
+                    callback, 48_000, 2, 480, monitorDevice.orDefault(), monitor,
+                    monitorFormat, monitorBitPerfect
+                )
                 check(handle != 0L) { "Native AAudio mixer could not start" }
                 configuredKeys = emptySet()
                 monitorDeviceId = monitorDevice.orDefault()
                 monitorEnabled = monitor
+                this.monitorFormat = monitorFormat
+                this.monitorBitPerfect = monitorBitPerfect
             }
             for (old in configuredKeys) {
                 if (old !in nextKeys) {
@@ -151,6 +161,10 @@ object NativeAudioGraph {
         val old = handle
         handle = 0L
         configuredKeys = emptySet()
+        monitorDeviceId = -1
+        monitorEnabled = false
+        monitorFormat = 2
+        monitorBitPerfect = false
         playbackEnabled = false
         playbackConfig = null
         externalConfigs = emptyList()

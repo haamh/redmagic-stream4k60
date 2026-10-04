@@ -48,7 +48,17 @@ object TextSourceRenderer {
         /** 0: one box behind the whole text; 1: a highlight behind each line. */
         val backgroundMode: Int = 0,
         /** Space around each line inside its highlight (px). */
-        val highlightPadding: Float = 12f
+        val highlightPadding: Float = 12f,
+        /** Compact ticker mode: the text rolls inside its own fixed viewport with the background as one item. */
+        val rolling: Boolean = false,
+        /** Rolling viewport width in source pixels. */
+        val rollingWidth: Int = 800,
+        /** Rolling viewport height; 0 means the text's measured height plus padding. */
+        val rollingHeight: Int = 0,
+        /** Rolling speed in source pixels/second. Positive moves left, negative moves right. */
+        val rollingSpeed: Float = 120f,
+        /** Gap between repeated copies of the rolling text. */
+        val rollingGap: Int = 64
     )
 
     /** [s] drawn [k] times larger, so text scaled up on the canvas stays sharp instead of stretching a small bitmap. */
@@ -120,7 +130,12 @@ object TextSourceRenderer {
             wrap = bool("wrap", if (cfg.has("word_wrap")) "word_wrap" else "extents_wrap", true),
             backgroundRadius = int("backgroundRadius", null, 0).coerceIn(0, 1024).toFloat(),
             backgroundMode = if (cfg.optString("backgroundStyle", "box") == "lines") 1 else 0,
-            highlightPadding = int("highlightPadding", null, 12).coerceIn(0, 512).toFloat()
+            highlightPadding = int("highlightPadding", null, 12).coerceIn(0, 512).toFloat(),
+            rolling = bool("rollingText", null, false),
+            rollingWidth = int("rollingWidth", null, 800).coerceIn(64, MAX_SIZE),
+            rollingHeight = int("rollingHeight", null, 0).coerceIn(0, MAX_SIZE),
+            rollingSpeed = cfg.optDouble("rollingSpeed", 120.0).toFloat().coerceIn(-2000f, 2000f),
+            rollingGap = int("rollingGap", null, 64).coerceIn(0, 4096)
         )
     }
 
@@ -241,11 +256,52 @@ object TextSourceRenderer {
     private fun drawBackground(canvas: Canvas, s: Style, w: Int, h: Int, lines: List<android.graphics.RectF>) {
         if ((s.background ushr 24) == 0) return
         val p = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = s.background }
+        val radiusForBox = s.backgroundRadius.coerceIn(0f, min(w, h) / 2f)
         when {
-            s.backgroundMode == 1 && lines.isNotEmpty() -> lines.forEach { canvas.drawRoundRect(it, s.backgroundRadius, s.backgroundRadius, p) }
-            s.backgroundRadius <= 0f -> canvas.drawColor(s.background, PorterDuff.Mode.SRC)
-            else -> canvas.drawRoundRect(0f, 0f, w.toFloat(), h.toFloat(), s.backgroundRadius, s.backgroundRadius, p)
+            s.backgroundMode == 1 && lines.isNotEmpty() -> lines.forEach {
+                val r = s.backgroundRadius.coerceIn(0f, min(it.width(), it.height()) / 2f)
+                canvas.drawRoundRect(it, r, r, p)
+            }
+            radiusForBox <= 0f -> canvas.drawColor(s.background, PorterDuff.Mode.SRC)
+            else -> canvas.drawRoundRect(0f, 0f, w.toFloat(), h.toFloat(), radiusForBox, radiusForBox, p)
         }
+    }
+
+    /** Width of the compact rolling viewport, never the full sentence width. */
+    fun rollingWidth(s: Style, measuredTextWidth: Int): Int =
+        s.rollingWidth.coerceIn(64, MAX_SIZE).let { requested -> if (requested > 0) requested else measuredTextWidth.coerceIn(64, MAX_SIZE) }
+
+    /** Height of the compact rolling viewport. 0 follows the text height; explicit values follow the box exactly. */
+    fun rollingHeight(s: Style, measuredTextHeight: Int): Int =
+        if (s.rollingHeight > 0) s.rollingHeight.coerceIn(32, MAX_SIZE)
+        else (measuredTextHeight + 12).coerceIn(32, MAX_SIZE)
+
+    /** Draw one rolling-text frame: text and its rounded box are the same source item and the text is clipped to the box. */
+    fun renderRollingFrame(s: Style, textBitmap: Bitmap, offset: Float, width: Int, height: Int): Bitmap {
+        val w = width.coerceIn(64, MAX_SIZE)
+        val h = height.coerceIn(32, MAX_SIZE)
+        val bitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(bitmap)
+        drawBackground(canvas, s.copy(backgroundMode = 0), w, h, emptyList())
+        val radius = s.backgroundRadius.coerceIn(0f, min(w, h) / 2f)
+        canvas.save()
+        if ((s.background ushr 24) != 0 && radius > 0f) {
+            val path = android.graphics.Path().apply {
+                addRoundRect(0f, 0f, w.toFloat(), h.toFloat(), radius, radius, android.graphics.Path.Direction.CW)
+            }
+            canvas.clipPath(path)
+        } else {
+            canvas.clipRect(0f, 0f, w.toFloat(), h.toFloat())
+        }
+        val y = ((h - textBitmap.height) / 2f).coerceAtLeast(0f)
+        val period = (textBitmap.width + s.rollingGap).coerceAtLeast(1).toFloat()
+        var x = -(offset % period + period) % period
+        while (x < w) {
+            canvas.drawBitmap(textBitmap, x, y, Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG))
+            x += period
+        }
+        canvas.restore()
+        return bitmap
     }
 
     /** Shadow, then outline, then the fill (solid or gradient), each a pass of [draw] with the paint set up for it. */

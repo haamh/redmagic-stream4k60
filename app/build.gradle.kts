@@ -13,8 +13,8 @@ android {
 
     defaultConfig {
         applicationId = "com.stream4k60.app"
-        // Target the Astra's Android 15 platform; native ADPF compositor hints require API 33.
-        minSdk = 33
+        // Android 15 / API 35 only. The app and native engine are intentionally not compatible with older Android versions.
+        minSdk = 35
         targetSdk = 35
         versionCode = 1
         versionName = "1.0.0"
@@ -30,7 +30,8 @@ android {
                 cppFlags += listOf("-std=c++20", "-O3", "-ffast-math", "-ftree-vectorize")
                 arguments += listOf(
                     "-DANDROID_STL=c++_shared",
-                    "-DANDROID_ARM_NEON=TRUE"
+                    "-DANDROID_ARM_NEON=TRUE",
+                    "-DANDROID_PLATFORM=android-35"
                 )
             }
         }

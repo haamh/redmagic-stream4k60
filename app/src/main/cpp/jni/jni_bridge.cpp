@@ -159,10 +159,10 @@ extern "C" JNIEXPORT jlong JNICALL Java_com_stream4k60_app_engine_NativeUsbBulk_
 extern "C" JNIEXPORT jlong JNICALL Java_com_stream4k60_app_engine_NativeUsbBulk_droppedFrames(JNIEnv*,jclass,jlong handle){std::lock_guard<std::mutex> lock(um);auto it=bulkStreams.find(handle);return it==bulkStreams.end()?0:(jlong)it->second->droppedFrames();}
 
 
-extern "C" JNIEXPORT jlong JNICALL Java_com_stream4k60_app_engine_NativeAudioMixer_start(JNIEnv* env,jclass,jobject callback,jint sampleRate,jint channels,jint blockFrames,jint monitorDeviceId,jboolean monitorEnabled){
+extern "C" JNIEXPORT jlong JNICALL Java_com_stream4k60_app_engine_NativeAudioMixer_start(JNIEnv* env,jclass,jobject callback,jint sampleRate,jint channels,jint blockFrames,jint monitorDeviceId,jboolean monitorEnabled,jint monitorFormat,jboolean monitorBitPerfect){
     if(!callback||sampleRate<=0||blockFrames<=0)return 0;
     JavaVM* vm=nullptr;if(env->GetJavaVM(&vm)!=JNI_OK)return 0;
-    auto mixer=std::make_shared<stream4k60::NativeAudioMixer>(vm,callback,sampleRate,channels,blockFrames,monitorDeviceId,monitorEnabled);
+    auto mixer=std::make_shared<stream4k60::NativeAudioMixer>(vm,callback,sampleRate,channels,blockFrames,monitorDeviceId,monitorEnabled,monitorFormat,monitorBitPerfect);
     if(!mixer->start())return 0;
     jlong h=nextAudioHandle.fetch_add(1);{std::lock_guard<std::mutex> l(um);audioMixers.emplace(h,mixer);}return h;
 }

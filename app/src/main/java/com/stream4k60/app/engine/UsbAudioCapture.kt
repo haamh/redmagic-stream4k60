@@ -87,6 +87,11 @@ class UsbAudioCapture(private val device: UsbDevice, private val connection: Usb
         if (h != 0L) { runCatching { StreamLog.add("USB mic $name stopped: ${NativeUsbAudio.stats(h)}") }; runCatching { NativeUsbAudio.stop(h) } }
         val intf = claimed ?: return
         claimed = null
+        if (deviceGone) {
+            // The physical device is already gone. Do not issue SET_INTERFACE, RELEASEINTERFACE, or USBDEVFS_CONNECT.
+            StreamLog.add("USB mic $name: device detached; skipped interface reset/rebind")
+            return
+        }
         findInterface(intf.id, 0)?.let { runCatching { connection.setInterface(it) } }
         runCatching { connection.releaseInterface(intf) }
         if (runCatching { NativeUsbAudio.reattachKernelDriver(connection.fileDescriptor, intf.id) }.getOrDefault(false) != true)

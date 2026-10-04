@@ -115,13 +115,14 @@ class BitmapSourceController(private val context: Context, private val scope:Cor
                 }else style.text
                 if(text!=last){
                     last=text
-                    val base=runCatching{TextSourceRenderer.render(context,style,text)}.getOrElse{SourceRuntimeErrors.report(src.id,"The text could not be drawn: \${it.message}");return}
+                    val base=runCatching{TextSourceRenderer.render(context,style,text)}.getOrElse{SourceRuntimeErrors.report(src.id,"The text could not be drawn: ${it.message}");return}
                     val logicalW=base.width
                     val logicalH=base.height
                     val k=minOf(textScale(src.transformJson,logicalW to logicalH),TextSourceRenderer.MAX_SIZE.toFloat()/logicalW,TextSourceRenderer.MAX_SIZE.toFloat()/logicalH).coerceAtLeast(1f)
                     val bitmap=if(k>1.01f)runCatching{TextSourceRenderer.render(context,TextSourceRenderer.scaled(style,k),text)}.getOrNull()?.also{base.recycle()}?:base else base
                     SourceNativeSizes.report(src.id,logicalW,logicalH)
-                    StreamLog.add("Text source \${src.name}: \${logicalW}x\${logicalH}\${if(bitmap!==base)" (drawn \${bitmap.width}x\${bitmap.height})" else ""}")
+                    val drawnSuffix=if(bitmap!==base) " (drawn " + bitmap.width + "x" + bitmap.height + ")" else ""
+                    StreamLog.add("Text source " + src.name + ": " + logicalW + "x" + logicalH + drawnSuffix)
                     val frame=bitmap.toRgba();bitmap.recycle()
                     uploadIfCurrent(src.id,fingerprint,src.configJson,frame.first,frame.second.first,frame.second.second)
                 }
@@ -158,13 +159,13 @@ class BitmapSourceController(private val context: Context, private val scope:Cor
                         textBitmap=runCatching{
                             TextSourceRenderer.render(context,style.copy(background=0,backgroundMode=0,extents=false),nextText.ifEmpty{" "})
                         }.getOrElse{
-                            SourceRuntimeErrors.report(src.id,"The rolling text could not be drawn: \${it.message}")
+                            SourceRuntimeErrors.report(src.id,"The rolling text could not be drawn: ${it.message}")
                             return
                         }
                         val w=TextSourceRenderer.rollingWidth(style,textBitmap!!.width)
                         val h=TextSourceRenderer.rollingHeight(style,textBitmap!!.height)
                         SourceNativeSizes.report(src.id,w,h)
-                        StreamLog.add("Rolling text \${src.name}: window \${w}x\${h}, text \${textBitmap!!.width}x\${textBitmap!!.height}")
+                        StreamLog.add("Rolling text ${src.name}: window ${w}x${h}, text ${textBitmap!!.width}x${textBitmap!!.height}")
                         offset=0f
                         previous=now
                     }

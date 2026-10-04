@@ -94,7 +94,7 @@ class NativeUsbManager @Inject constructor(@ApplicationContext private val conte
         if(sessions[deviceId]!==session)return
         val name=_devices.value.firstOrNull{it.deviceId==deviceId}?.displayName?:"device $deviceId"
         StreamLog.add("USB device $name: closed after it stopped answering (it comes back when replugged)")
-        stopAudioLocked(deviceId);sessions.remove(deviceId)?.let{runCatching{it.stop(deviceGone = true)}};sessionSignatures.remove(deviceId)
+        stopAudioLocked(deviceId, true);sessions.remove(deviceId)?.let{runCatching{it.stop(deviceGone = true)}};sessionSignatures.remove(deviceId)
         connections.remove(deviceId)?.let{runCatching{it.close()}};_devices.value=_devices.value.filterNot{it.deviceId==deviceId};updateBudget()
     }
     @Synchronized private fun remove(device:UsbDevice){

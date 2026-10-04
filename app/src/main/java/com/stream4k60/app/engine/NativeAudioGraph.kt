@@ -133,7 +133,12 @@ object NativeAudioGraph {
         )
     }
 
+    private fun applyGain(route: AudioInputRoute) {
+        NativeAudioMixer.setInputGain(handle, route.sourceId, route.gain?.gainDb ?: 0f)
+    }
+
     private fun applyGate(route: AudioInputRoute) {
+        applyGain(route)
         val gate = route.noiseGate
         NativeAudioMixer.setInputGate(
             handle, route.sourceId, gate != null,

@@ -120,11 +120,17 @@ fun FilterEditorScreen(
         snapshotFlow { video.toList() }.collect { NativeEngine.applySourceFilterChain(source.id, it) }
     }
     if (supportsAudio) LaunchedEffect(source.id) {
-        snapshotFlow { audio.toList() }.collect { NativeAudioGraph.previewGate(mixerInputId, AudioFilterChain.noiseGate(it)) }
+        snapshotFlow { audio.toList() }.collect {
+            NativeAudioGraph.previewGain(mixerInputId, AudioFilterChain.gain(it))
+            NativeAudioGraph.previewGate(mixerInputId, AudioFilterChain.noiseGate(it))
+        }
     }
     val cancel = {
         if (supportsVideo) NativeEngine.setSourceEffectsFromConfig(source.id, source.configJson)
-        if (supportsAudio) NativeAudioGraph.previewGate(mixerInputId, AudioFilterChain.noiseGate(source.configJson))
+        if (supportsAudio) {
+            NativeAudioGraph.previewGain(mixerInputId, AudioFilterChain.gain(source.configJson))
+            NativeAudioGraph.previewGate(mixerInputId, AudioFilterChain.noiseGate(source.configJson))
+        }
         onCancel()
     }
 
@@ -170,11 +176,18 @@ fun FilterEditorScreen(
                             onMove = { from, to -> audio.add(to, audio.removeAt(from)); selectedAudio = to },
                             onRemove = { i -> audio.removeAt(i); selectedAudio = if (audio.isEmpty()) -1 else selectedAudio.coerceAtMost(audio.lastIndex) }
                         )
+                        val hasGain = audio.any { it.type == AudioFilterType.GAIN }
                         val hasGate = audio.any { it.type == AudioFilterType.NOISE_GATE }
-                        AddFilterButton(listOf(Triple(AudioFilterType.NOISE_GATE.label,
+                        AddFilterButton(listOf(
+                            Triple(AudioFilterType.GAIN.label, if (hasGain) "This source already has a Gain filter." else "Increase or reduce this source's level.", !hasGain),
+                            Triple(AudioFilterType.NOISE_GATE.label,
                             if (hasGate) "This source already has a noise gate." else "Mute background noise between words.", !hasGate))) {
-                            audio.add(AudioFilterStage(type = AudioFilterType.NOISE_GATE))
-                            selectedAudio = audio.lastIndex
+                            // The selected menu entry is mapped by its index: Gain first, Noise Gate second.
+                            val type = if (index == 0) AudioFilterType.GAIN else AudioFilterType.NOISE_GATE
+                            if (type == AudioFilterType.GAIN || !audio.any { it.type == AudioFilterType.NOISE_GATE }) {
+                                audio.add(AudioFilterStage(type = type))
+                                selectedAudio = audio.lastIndex
+                            }
                         }
                         audio.getOrNull(selectedAudio)?.let { stage ->
                             HorizontalDivider(Modifier.padding(vertical = 12.dp))
@@ -454,6 +467,15 @@ private fun ColorField(label: String, stage: VideoFilterStage, key: String, desc
 private fun AudioStageSettings(stage: AudioFilterStage, mixerInputId: String, onChange: (AudioFilterStage) -> Unit) {
     NameField(stage.name) { onChange(stage.copy(name = it)) }
     when (stage.type) {
+        AudioFilterType.GAIN -> {
+            StageSlider(
+                stage.float("gainDb"),
+                "Gain",
+                AudioFilterChain.GAIN_MIN_DB..AudioFilterChain.GAIN_MAX_DB,
+                "Boost or reduce this source before its normal volume control. 0 dB is unchanged.",
+                ::decibels
+            ) { onChange(stage.with("gainDb", it.roundToInt().toDouble())) }
+        }
         AudioFilterType.NOISE_GATE -> {
             val gate = AudioFilterChain.gateConfig(stage)
             LevelMeter(mixerInputId, gate.openDb, gate.closeDb)

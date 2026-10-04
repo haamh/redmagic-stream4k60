@@ -128,19 +128,9 @@ fun SourcePropertiesDialog(
     }
 
     fun rememberImageUri(uri: Uri) {
+        // Always make a private app-local copy for images. This avoids provider-specific
+        // content:// lifetime/permission problems after the picker closes.
         coroutineScope.launch(Dispatchers.IO) {
-            val persisted = runCatching {
-                context.contentResolver.takePersistableUriPermission(uri, android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                true
-            }.getOrDefault(false)
-            if (persisted) {
-                withContext(kotlinx.coroutines.Dispatchers.Main) {
-                    set("file", uri.toString())
-                    set("url", "")
-                    pickerError = null
-                }
-                return@launch
-            }
             val mime = runCatching { context.contentResolver.getType(uri) }.getOrNull().orEmpty()
             val ext = android.webkit.MimeTypeMap.getSingleton().getExtensionFromMimeType(mime)
                 ?: uri.lastPathSegment?.substringAfterLast('.', "")?.takeIf { it.length in 2..8 }
@@ -152,15 +142,21 @@ fun SourcePropertiesDialog(
                 context.contentResolver.openInputStream(uri)?.use { input ->
                     target.outputStream().use { output -> input.copyTo(output) }
                 } ?: error("The selected document could not be opened.")
-                target.length() > 0L
-            }.isSuccess
+                if (!target.isFile || target.length() <= 0L) error("The selected image copy is empty.")
+                // Verify that Android can actually decode the copied image before saving it.
+                val bounds = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                android.graphics.BitmapFactory.decodeFile(target.absolutePath, bounds)
+                if (bounds.outWidth <= 0 || bounds.outHeight <= 0) error("The selected file is not a decodable image.")
+                true
+            }.getOrDefault(false)
             withContext(kotlinx.coroutines.Dispatchers.Main) {
                 if (copied) {
                     set("file", target.absolutePath)
                     set("url", "")
                     pickerError = null
                 } else {
-                    pickerError = "The selected image could not be copied from Android's document provider. Choose another image file."
+                    target.delete()
+                    pickerError = "Android could not decode that image after copying it. Try a PNG/JPG from Files, or use Image URL."
                 }
             }
         }

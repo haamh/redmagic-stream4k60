@@ -14,7 +14,7 @@ namespace stream4k60 {
 
 class NativeAudioMixer {
 public:
-    NativeAudioMixer(JavaVM* vm, jobject callback, int sampleRate, int channels, int blockFrames, int monitorDeviceId, bool monitorEnabled);
+    NativeAudioMixer(JavaVM* vm, jobject callback, int sampleRate, int channels, int blockFrames, int monitorDeviceId, bool monitorEnabled, int monitorFormat, bool monitorBitPerfect);
     ~NativeAudioMixer();
     bool start();
     bool addInput(const std::string& sourceId, int32_t deviceId, float volume, float balance, bool muted, int monitoring, int syncOffsetMs);

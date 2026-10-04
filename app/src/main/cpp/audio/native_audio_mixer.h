@@ -24,6 +24,7 @@ public:
     bool setInputConfig(const std::string& sourceId, float volume, float balance, bool muted, int monitoring, int syncOffsetMs, bool solo);
     // Per-input noise gate on the 48 kHz program bus. Thresholds in dBFS; times in milliseconds.
     bool setInputGate(const std::string& sourceId, bool enabled, float openDb, float closeDb, float attackMs, float holdMs, float releaseMs);
+    // Per-input gain filter on the 48 kHz program bus. Gain is in dB and clamped to -30..+30 dB.
     void stop();
     void setMonitorVolume(float volume);
     void setMonitorMuted(bool muted);
@@ -97,6 +98,9 @@ private:
             float level = 0.f, attenuation = 1.f, heldSamples = 0.f;
             bool open = false;
         } gate;
+        struct Gain {
+            float multiplier = 1.0f;
+        } gain;
     };
 
     static aaudio_data_callback_result_t dataCallback(AAudioStream*, void*, void*, int32_t);
@@ -105,6 +109,8 @@ private:
     void capture(Input& input, void* audioData, int32_t frames);
     void mixLoop();
     static void applyGate(Input::Gate& gate, float* stereo, size_t frames, float levelDecay);
+    static void applyGain(const Input::Gain& gain, float* stereo, size_t frames);
+    bool setInputGain(const std::string& sourceId, float gainDb);
     bool openInput(Input& input);
     std::string lastInputError_; // guarded by inputsMutex_ (openInput runs under it)
     void closeInput(Input& input);

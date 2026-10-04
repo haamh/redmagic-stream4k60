@@ -96,6 +96,14 @@ bool NativeAudioMixer::pushExternalPcm(const std::string& id,const float*samples
 
 bool NativeAudioMixer::removeInput(const std::string&id){std::lock_guard<std::mutex>l(inputsMutex_);auto it=std::find_if(inputs_.begin(),inputs_.end(),[&](const auto&i){return i->id==id;});if(it==inputs_.end())return false;closeInput(*(*it));inputs_.erase(it);return true;}
 bool NativeAudioMixer::setInputConfig(const std::string&id,float volume,float balance,bool muted,int monitoring,int syncOffsetMs,bool solo){std::lock_guard<std::mutex>l(inputsMutex_);auto it=std::find_if(inputs_.begin(),inputs_.end(),[&](const auto&i){return i->id==id;});if(it==inputs_.end())return false;auto&i=*(*it);i.volume=std::max(0.f,volume);i.balance=clamp1(balance);i.muted=muted;i.monitoring=std::clamp(monitoring,0,3);i.syncOffsetMs=syncOffsetMs;i.solo=solo;return true;}
+bool NativeAudioMixer::setInputGain(const std::string&id,float gainDb){
+    std::lock_guard<std::mutex>l(inputsMutex_);
+    auto it=std::find_if(inputs_.begin(),inputs_.end(),[&](const auto&i){return i->id==id;});
+    if(it==inputs_.end())return false;
+    const float db=std::clamp(gainDb,-30.f,30.f);
+    (*it)->gain.multiplier=std::pow(10.f,db/20.f);
+    return true;
+}
 bool NativeAudioMixer::setInputGate(const std::string&id,bool enabled,float openDb,float closeDb,float attackMs,float holdMs,float releaseMs){
     std::lock_guard<std::mutex>l(inputsMutex_);
     auto it=std::find_if(inputs_.begin(),inputs_.end(),[&](const auto&i){return i->id==id;});
@@ -125,6 +133,10 @@ void NativeAudioMixer::applyGate(Input::Gate&g,float*stereo,size_t frames,float 
         else{g.heldSamples+=1.f;if(g.heldSamples>g.holdSamples)g.attenuation=std::max(0.f,g.attenuation-g.releaseRate);}
         stereo[f*2]*=g.attenuation;stereo[f*2+1]*=g.attenuation;
     }
+}
+void NativeAudioMixer::applyGain(const Input::Gain&g,float*stereo,size_t frames){
+    if(!stereo||g.multiplier==1.f)return;
+    for(size_t n=0;n<frames*2;++n)stereo[n]*=g.multiplier;
 }
 void NativeAudioMixer::setMonitorVolume(float v){monitorVolume_=std::max(0.f,v);}void NativeAudioMixer::setMonitorMuted(bool m){monitorMuted_=m;}
 float NativeAudioMixer::getPeak(const std::string& id) const{std::lock_guard<std::mutex>l(inputsMutex_);auto it=std::find_if(inputs_.begin(),inputs_.end(),[&](const auto&i){return i->id==id;});return it==inputs_.end()?0.f:(*it)->peak.load();}
@@ -429,6 +441,7 @@ void NativeAudioMixer::mixLoop(){
                 const size_t got=i->ring->popUpTo(tmp.data(),static_cast<size_t>(blockFrames_));
                 if(got<static_cast<size_t>(blockFrames_)){std::fill(tmp.begin()+static_cast<std::ptrdiff_t>(got*2),tmp.end(),0.f);i->shortWindows++;}
                 if(i->gate.enabled)applyGate(i->gate,tmp.data(),static_cast<size_t>(blockFrames_),gateLevelDecay);
+                applyGain(i->gain,tmp.data(),static_cast<size_t>(blockFrames_));
                 i->peak.store(i->peak.load(std::memory_order_relaxed)*0.96f,std::memory_order_relaxed);
                 const float v=i->volume.load(),pan=clamp1(i->balance.load()),L=v*(pan>0?1.f-pan:1.f),R=v*(pan<0?1.f+pan:1.f);
                 for(size_t n=0;n<program.size();n+=2){const float lv=tmp[n]*L,rv=tmp[n+1]*R;if(toProgram){program[n]+=lv;program[n+1]+=rv;}if(toMonitor){monitor[n]+=lv;monitor[n+1]+=rv;}}

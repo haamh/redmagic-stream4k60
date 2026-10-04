@@ -103,31 +103,85 @@ class BitmapSourceController(private val context: Context, private val scope:Cor
         }
     }
 
-    /** Text, redrawn when its file changes (OBS checks a "read from file" text file about once a second). */
+    /** Text plus optional compact rolling-text ticker. Rolling mode keeps the rounded viewport as part of the source itself. */
     private suspend fun renderText(src:com.stream4k60.app.ui.main.SourceItem,fingerprint:String,cfg:JSONObject,imported:Boolean){
         val style=TextSourceRenderer.style(cfg,src.name,imported)
-        var last:String?=null
-        while(kotlinx.coroutines.currentCoroutineContext().isActive&&sourceFingerprints[src.id]==fingerprint){
-            val text=if(style.readFromFile){
-                if(style.file.isBlank()){SourceRuntimeErrors.report(src.id,"Read from file is on: choose a text file in source properties.");""}
-                else withContext(Dispatchers.IO){TextSourceRenderer.readTextFile(context,style.file)}?:run{SourceRuntimeErrors.report(src.id,"The text file could not be read. Choose it again.");""}
-            }else style.text
-            if(text!=last){
-                last=text
-                val base=runCatching{TextSourceRenderer.render(context,style,text)}.getOrElse{SourceRuntimeErrors.report(src.id,"The text could not be drawn: ${it.message}");return}
-                // The layout keeps the text's own size; the texture is drawn as many times larger as the source is shown, so
-                // scaled-up text is as sharp as text drawn at that size (it used to be a small bitmap stretched on the canvas).
-                val logicalW=base.width;val logicalH=base.height
-                val k=minOf(textScale(src.transformJson,logicalW to logicalH),TextSourceRenderer.MAX_SIZE.toFloat()/logicalW,TextSourceRenderer.MAX_SIZE.toFloat()/logicalH).coerceAtLeast(1f)
-                val bitmap=if(k>1.01f)runCatching{TextSourceRenderer.render(context,TextSourceRenderer.scaled(style,k),text)}.getOrNull()?.also{base.recycle()}?:base else base
-                SourceNativeSizes.report(src.id,logicalW,logicalH)
-                StreamLog.add("Text source ${src.name}: ${logicalW}x$logicalH${if(bitmap!==base)" (drawn ${bitmap.width}x${bitmap.height})" else ""}")
-                val frame=bitmap.toRgba();bitmap.recycle()
-                uploadIfCurrent(src.id,fingerprint,src.configJson,frame.first,frame.second.first,frame.second.second)
+        if(!style.rolling){
+            var last:String?=null
+            while(kotlinx.coroutines.currentCoroutineContext().isActive&&sourceFingerprints[src.id]==fingerprint){
+                val text=if(style.readFromFile){
+                    if(style.file.isBlank()){SourceRuntimeErrors.report(src.id,"Read from file is on: choose a text file in source properties.");""}
+                    else withContext(Dispatchers.IO){TextSourceRenderer.readTextFile(context,style.file)}?:run{SourceRuntimeErrors.report(src.id,"The text file could not be read. Choose it again.");""}
+                }else style.text
+                if(text!=last){
+                    last=text
+                    val base=runCatching{TextSourceRenderer.render(context,style,text)}.getOrElse{SourceRuntimeErrors.report(src.id,"The text could not be drawn: \${it.message}");return}
+                    val logicalW=base.width
+                    val logicalH=base.height
+                    val k=minOf(textScale(src.transformJson,logicalW to logicalH),TextSourceRenderer.MAX_SIZE.toFloat()/logicalW,TextSourceRenderer.MAX_SIZE.toFloat()/logicalH).coerceAtLeast(1f)
+                    val bitmap=if(k>1.01f)runCatching{TextSourceRenderer.render(context,TextSourceRenderer.scaled(style,k),text)}.getOrNull()?.also{base.recycle()}?:base else base
+                    SourceNativeSizes.report(src.id,logicalW,logicalH)
+                    StreamLog.add("Text source \${src.name}: \${logicalW}x\${logicalH}\${if(bitmap!==base)" (drawn \${bitmap.width}x\${bitmap.height})" else ""}")
+                    val frame=bitmap.toRgba();bitmap.recycle()
+                    uploadIfCurrent(src.id,fingerprint,src.configJson,frame.first,frame.second.first,frame.second.second)
+                }
+                if(!style.readFromFile)return
+                kotlinx.coroutines.delay(1000)
             }
-            if(!style.readFromFile)return
-            kotlinx.coroutines.delay(1000)
+            return
         }
+
+        var textBitmap:android.graphics.Bitmap?=null
+        var currentText:String?=null
+        var nextFilePoll=0L
+        var offset=0f
+        var previous=android.os.SystemClock.uptimeMillis()
+        try{
+            while(kotlinx.coroutines.currentCoroutineContext().isActive&&sourceFingerprints[src.id]==fingerprint){
+                val now=android.os.SystemClock.uptimeMillis()
+                if(currentText==null||style.readFromFile&&now>=nextFilePoll){
+                    val nextText=if(style.readFromFile){
+                        nextFilePoll=now+1000L
+                        if(style.file.isBlank()){
+                            SourceRuntimeErrors.report(src.id,"Read from file is on: choose a text file in source properties.")
+                            ""
+                        }else withContext(Dispatchers.IO){
+                            TextSourceRenderer.readTextFile(context,style.file)
+                        }?:run{
+                            SourceRuntimeErrors.report(src.id,"The text file could not be read. Choose it again.")
+                            ""
+                        }
+                    }else style.text
+                    if(nextText!=currentText){
+                        currentText=nextText
+                        textBitmap?.recycle()
+                        textBitmap=runCatching{
+                            TextSourceRenderer.render(context,style.copy(background=0,backgroundMode=0,extents=false),nextText.ifEmpty{" "})
+                        }.getOrElse{
+                            SourceRuntimeErrors.report(src.id,"The rolling text could not be drawn: \${it.message}")
+                            return
+                        }
+                        val w=TextSourceRenderer.rollingWidth(style,textBitmap!!.width)
+                        val h=TextSourceRenderer.rollingHeight(style,textBitmap!!.height)
+                        SourceNativeSizes.report(src.id,w,h)
+                        StreamLog.add("Rolling text \${src.name}: window \${w}x\${h}, text \${textBitmap!!.width}x\${textBitmap!!.height}")
+                        offset=0f
+                        previous=now
+                    }
+                }
+                val bitmap=textBitmap?:continue
+                val dt=((now-previous).coerceAtMost(100L)).coerceAtLeast(0L)/1000f
+                previous=now
+                offset+=style.rollingSpeed*dt
+                val w=TextSourceRenderer.rollingWidth(style,bitmap.width)
+                val h=TextSourceRenderer.rollingHeight(style,bitmap.height)
+                val frame=TextSourceRenderer.renderRollingFrame(style,bitmap,offset,w,h)
+                val rgba=frame.toRgba()
+                frame.recycle()
+                uploadIfCurrent(src.id,fingerprint,src.configJson,rgba.first,rgba.second.first,rgba.second.second)
+                kotlinx.coroutines.delay(16)
+            }
+        }finally{textBitmap?.recycle()}
     }
 
     /** How many times larger than its own size a text source is shown on the canvas (from its transform), in quarter steps, 1-4. */

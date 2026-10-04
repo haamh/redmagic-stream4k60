@@ -577,11 +577,11 @@ private fun transitionCode(name:String):Int=when(name){"Cut"->0;else->1}
  }
  private fun parseAudioRoute(src:SourceItem):AudioInputRoute{
   val j=sourceAudioSettings(src.configJson)
-  return AudioInputRoute(src.id,j.optInt("deviceId",-1),j.optDouble("volume",1.0).toFloat().coerceIn(0f,2f),j.optDouble("balance",0.0).toFloat().coerceIn(-1f,1f),j.optBoolean("muted",false),runCatching{AudioMonitoring.valueOf(j.optString("monitoring","MONITOR_AND_OUTPUT"))}.getOrDefault(AudioMonitoring.MONITOR_AND_OUTPUT),j.optInt("syncOffsetMs",0).coerceIn(-2000,2000),j.optBoolean("solo",false),AudioFilterChain.noiseGate(src.configJson))
+  return AudioInputRoute(src.id,j.optInt("deviceId",-1),j.optDouble("volume",1.0).toFloat().coerceIn(0f,2f),j.optDouble("balance",0.0).toFloat().coerceIn(-1f,1f),j.optBoolean("muted",false),runCatching{AudioMonitoring.valueOf(j.optString("monitoring","MONITOR_AND_OUTPUT"))}.getOrDefault(AudioMonitoring.MONITOR_AND_OUTPUT),j.optInt("syncOffsetMs",0).coerceIn(-2000,2000),j.optBoolean("solo",false),AudioFilterChain.noiseGate(src.configJson),AudioFilterChain.gain(src.configJson))
  }
  private fun parsePlaybackRoute(src:SourceItem):AudioInputRoute{
   val j=sourceAudioSettings(src.configJson)
-  return AudioInputRoute(NativeAudioBridge.PLAYBACK_SOURCE_ID,-1,j.optDouble("volume",1.0).toFloat().coerceIn(0f,2f),j.optDouble("balance",0.0).toFloat().coerceIn(-1f,1f),j.optBoolean("muted",false),runCatching{AudioMonitoring.valueOf(j.optString("monitoring","OUTPUT_ONLY"))}.getOrDefault(AudioMonitoring.OUTPUT_ONLY),j.optInt("syncOffsetMs",0).coerceIn(-2000,2000),j.optBoolean("solo",false),AudioFilterChain.noiseGate(src.configJson))
+  return AudioInputRoute(NativeAudioBridge.PLAYBACK_SOURCE_ID,-1,j.optDouble("volume",1.0).toFloat().coerceIn(0f,2f),j.optDouble("balance",0.0).toFloat().coerceIn(-1f,1f),j.optBoolean("muted",false),runCatching{AudioMonitoring.valueOf(j.optString("monitoring","OUTPUT_ONLY"))}.getOrDefault(AudioMonitoring.OUTPUT_ONLY),j.optInt("syncOffsetMs",0).coerceIn(-2000,2000),j.optBoolean("solo",false),AudioFilterChain.noiseGate(src.configJson),AudioFilterChain.gain(src.configJson))
  }
  /** Sources read straight from USB (each its own mixer input), outside Android's one-USB-microphone limit. */
  private fun usbAudioRoutes():List<AudioInputRoute> = renderedItems().mapNotNull{src->

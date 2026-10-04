@@ -343,8 +343,6 @@ class BitmapSourceController(private val context: Context, private val scope:Cor
                 try {
                     if (connection.responseCode !in 200..299) return@runCatching null
                     val bytes=connection.inputStream.use { it.readBytes() }
-                    val bounds=BitmapFactory.Options().apply{inJustDecodeBounds=true}
-                    BitmapFactory.decodeByteArray(bytes,0,bytes.size,null).also { it?.recycle() }
                     val boundsCheck=BitmapFactory.Options().apply{inJustDecodeBounds=true}
                     BitmapFactory.decodeByteArray(bytes,0,bytes.size,boundsCheck)
                     if(boundsCheck.outWidth<=0||boundsCheck.outHeight<=0)return@runCatching null

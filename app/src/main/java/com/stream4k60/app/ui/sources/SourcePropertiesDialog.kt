@@ -143,7 +143,7 @@ fun SourcePropertiesDialog(
             }
             val mime = runCatching { context.contentResolver.getType(uri) }.getOrNull().orEmpty()
             val ext = android.webkit.MimeTypeMap.getSingleton().getExtensionFromMimeType(mime)
-                ?: uri.lastPathSegment?.substringAfterLast('.', "").takeIf { it.length in 2..8 }
+                ?: uri.lastPathSegment?.substringAfterLast('.', "")?.takeIf { it.length in 2..8 }
                 ?: "bin"
             val dir = java.io.File(context.filesDir, "source_assets")
             val target = java.io.File(dir, "image_" + java.util.UUID.randomUUID().toString() + "." + ext)

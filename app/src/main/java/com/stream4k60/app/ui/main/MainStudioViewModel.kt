@@ -468,15 +468,13 @@ private fun transitionCode(name:String):Int=when(name){"Cut"->0;else->1}
   }.map{it.id}.toSet()
   val configuredReportIds=reportIds-missingDeviceIds
   val sourceNames=audioSources.associate{it.id to it.name}
+  val lossless=audioSettingsState.value.losslessMonitoring
+  val monitorFormat=if(lossless)4 else 2
   viewModelScope.launch(kotlinx.coroutines.Dispatchers.Default) {
-    runCatching { NativeAudioGraph.configure(routes,playbackRoute,monitor,monitor!=null,mediaAudioRoutes()+usbAudioRoutes()) }
+    runCatching { NativeAudioGraph.configure(routes,playbackRoute,monitor,monitor!=null,mediaAudioRoutes()+usbAudioRoutes(),monitorFormat,lossless) }
      .onSuccess { failures ->
       // Direct USB microphones push into whichever mixer is current (it is replaced when the monitor device changes).
       com.stream4k60.app.engine.NativeUsbAudio.setMixer(NativeAudioGraph.currentHandle())
-      // Lossless monitoring: the direct output in the 32-bit integer format it runs at (AAudio PCM_I32 = 4, no conversion
-      // anywhere); else float through Android's mixer.
-      val lossless=audioSettingsState.value.losslessMonitoring
-      NativeAudioGraph.currentHandle().takeIf{it!=0L}?.let{com.stream4k60.app.engine.NativeAudioMixer.setMonitorOutput(it,if(lossless)4 else 2,lossless)}
       syncAudioGraphErrors.forEach(SourceRuntimeErrors::clear); syncAudioGraphErrors=failures.keys
       (configuredReportIds-failures.keys).forEach(SourceRuntimeErrors::clear)
       // Only the inputs that failed show an error; the rest of the mix keeps running.

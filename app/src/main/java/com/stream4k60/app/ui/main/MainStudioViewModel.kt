@@ -602,7 +602,7 @@ private fun transitionCode(name:String):Int=when(name){"Cut"->0;else->1}
     sourceId=if(isCaptureCard)"usb_audio_${src.id}" else src.id, deviceId=id, volume=j.optDouble("volume",1.0).toFloat().coerceIn(0f,2f), balance=j.optDouble("balance",0.0).toFloat().coerceIn(-1f,1f), muted=j.optBoolean("muted",false),
     monitoring=runCatching{AudioMonitoring.valueOf(j.optString("monitoring","MONITOR_AND_OUTPUT"))}.getOrDefault(AudioMonitoring.MONITOR_AND_OUTPUT),
     syncOffsetMs=j.optInt("syncOffsetMs",0).coerceIn(-2000,2000), solo=j.optBoolean("solo",false),
-    noiseGate=AudioFilterChain.noiseGate(src.configJson),AudioFilterChain.gain(src.configJson)
+    noiseGate=AudioFilterChain.noiseGate(src.configJson),gain=AudioFilterChain.gain(src.configJson)
    )
   }.getOrNull()
  }

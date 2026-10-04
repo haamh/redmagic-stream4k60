@@ -88,6 +88,16 @@ internal fun TextSourceOptions(sourceName: String, imported: Boolean, settings: 
     ChoiceDropdown("Transform", listOf("0" to "None", "1" to "Uppercase", "2" to "Lowercase", "3" to "Start Case"), style.transform.toString()) { set("textTransform", it.toInt()) }
     CheckField("Vertical", style.vertical, "Characters run top to bottom; each line becomes a column, right to left.") { set("vertical", it) }
 
+    OptionSection("Rolling text")
+    CheckField("Rolling text", style.rolling, "Keeps a compact curved window while the text rolls inside it. The text and box move and resize as one source.") { set("rollingText", it) }
+    if (style.rolling) {
+        SliderField("Window width", style.rollingWidth, 64..4096, " px") { set("rollingWidth", it) }
+        SliderField("Window height", style.rollingHeight, 0..1024, " px (0 = fit text)") { set("rollingHeight", it) }
+        SliderField("Rolling speed", style.rollingSpeed.toInt(), -2000..2000, " px/s") { set("rollingSpeed", it) }
+        SliderField("Gap", style.rollingGap, 0..2048, " px") { set("rollingGap", it) }
+        Text("Positive speed rolls left; negative rolls right. The window is the source itself, so its curved ends stay visible instead of requiring the whole sentence width.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
+
     OptionSection("Outline and shadow")
     CheckField("Outline", style.outline) { set("outline", it) }
     if (style.outline) {

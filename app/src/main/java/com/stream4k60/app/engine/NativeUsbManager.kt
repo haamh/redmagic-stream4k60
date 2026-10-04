@@ -1,0 +1,200 @@
+package com.stream4k60.app.engine
+
+import android.app.PendingIntent
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
+import android.hardware.usb.*
+import android.os.Build
+import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.stateIn
+import timber.log.Timber
+import org.json.JSONObject
+import javax.inject.Inject
+import javax.inject.Singleton
+
+enum class UsbDeviceType { VIDEO_CAMERA,CAPTURE_CARD,AUDIO_INPUT,AUDIO_OUTPUT,COMPOSITE_AV,HID_CONTROLLER,UNKNOWN }
+enum class UsbSpeed(val bandwidthMbps:Int,val displayName:String){USB_1_1(12,"USB 1.1 (12 Mbps)"),USB_2_0(480,"USB 2.0 (480 Mbps)"),USB_3_0(5000,"USB 3.2 Gen 1 (5 Gbps)"),USB_3_2_GEN2(10000,"USB 3.2 Gen 2 (10 Gbps)"),UNKNOWN(0,"Unknown")}
+data class UsbDeviceInfo(val deviceId:Int,val deviceName:String,val displayName:String,val vendorId:Int,val productId:Int,val manufacturerName:String?,val productName:String?,val serialNumber:String?,val deviceType:UsbDeviceType,val usbSpeed:UsbSpeed,val nativeHandle:Long=0,val isConnected:Boolean=false,val isCapturing:Boolean=false,val currentFormat:String="",val transport:String="",val supportedFormats:List<String> = emptyList(),val estimatedBandwidthMbps:Int=0,val hasAudio:Boolean=false,val audioSourceId:String?=null)
+data class UsbBandwidthBudget(val totalBandwidthMbps:Int,val usedBandwidthMbps:Int,val availableBandwidthMbps:Int,val devices:List<UsbDeviceInfo>)
+
+@Singleton
+class NativeUsbManager @Inject constructor(@ApplicationContext private val context:Context){
+    private val usb=context.getSystemService(Context.USB_SERVICE) as UsbManager
+    private val scope=CoroutineScope(SupervisorJob()+Dispatchers.Default)
+    private val _devices=MutableStateFlow<List<UsbDeviceInfo>>(emptyList());val connectedDevices:StateFlow<List<UsbDeviceInfo>> = _devices.asStateFlow()
+    private val _budget=MutableStateFlow(UsbBandwidthBudget(5000,0,5000,emptyList()));val bandwidthBudget:StateFlow<UsbBandwidthBudget> = _budget.asStateFlow()
+    val videoCameras:StateFlow<List<UsbDeviceInfo>> = _devices.map{it.filter{d->d.deviceType==UsbDeviceType.VIDEO_CAMERA||d.deviceType==UsbDeviceType.CAPTURE_CARD||d.deviceType==UsbDeviceType.COMPOSITE_AV}}.stateIn(scope,SharingStarted.Eagerly,emptyList())
+    val audioDevices:StateFlow<List<UsbDeviceInfo>> = _devices.map{it.filter{d->d.deviceType==UsbDeviceType.AUDIO_INPUT||d.deviceType==UsbDeviceType.AUDIO_OUTPUT||d.deviceType==UsbDeviceType.COMPOSITE_AV}}.stateIn(scope,SharingStarted.Eagerly,emptyList())
+
+    private val connections=mutableMapOf<Int,UsbDeviceConnection>()
+    private val sessions=mutableMapOf<Int,UvcCaptureSession>()
+    private val sessionSignatures=mutableMapOf<Int,String>()
+    private var receiverRegistered=false
+
+    companion object{
+        private const val ACTION_USB_PERMISSION="com.stream4k60.USB_PERMISSION"
+        val CAPTURE_CARD_VENDORS=mapOf(0x0FD9 to "Elgato",0x07CA to "AVerMedia",0x2935 to "Magewell",0x534D to "Blackmagic",0x1B80 to "Hauppauge",0x0572 to "Conexant",0x04F2 to "Chicony")
+        val AUDIO_INTERFACE_VENDORS=mapOf(0x1235 to "Focusrite",0x0582 to "Roland",0x0763 to "M-Audio",0x1397 to "BEHRINGER",0x07FD to "MOTU",0x0644 to "TEAC",0x2573 to "ESI",0x17CC to "Native Instruments",0x0D8C to "C-Media",0x08BB to "Texas Instruments")
+        fun estimateBandwidth(width:Int,height:Int,fps:Int,format:String):Int{
+            // Compressed rates are typical webcam averages (MJPEG ≈ 1 bit/pixel); uncompressed are exact.
+            val bpp=when(format.uppercase()){"MJPEG"->0.12f;"H264","HEVC","H265"->0.03f;"YUY2","YUYV"->2f;"NV12"->1.5f;else->2f}
+            return ((width.toLong()*height*fps*bpp*8)/1_000_000L).toInt().coerceAtLeast(1)
+        }
+    }
+
+    // A device that drops off and comes back (a dock whose link renegotiates, e.g. when a monitor on it changes mode) used
+    // to be opened, probed and asked for permission on every return, and a device vanishing mid-probe crashed the app.
+    // Now nothing here can crash the app, and a device is only opened once it has stayed connected for a moment (which
+    // also gives Android's "Always open" choice time to grant permission before the app asks).
+    private val lastDetach=java.util.concurrent.ConcurrentHashMap<String,Long>()
+    private fun keyOf(d:UsbDevice)="${d.vendorId}:${d.productId}:${runCatching{d.serialNumber}.getOrNull().orEmpty()}"
+    private val receiver=object:BroadcastReceiver(){override fun onReceive(c:Context,i:Intent){runCatching{when(i.action){
+        UsbManager.ACTION_USB_DEVICE_ATTACHED->extra(i)?.let{d->
+            val recent=lastDetach[keyOf(d)]?.let{android.os.SystemClock.elapsedRealtime()-it<10_000}==true
+            if(recent)StreamLog.add("USB device ${d.productName?:d.deviceName} came back within 10 s of dropping off: waiting until it stays connected")
+            scope.launch{delay(if(recent)4000 else 1500);if(usb.deviceList.values.any{it.deviceId==d.deviceId})runCatching{requestOrOpen(d)}}}
+        UsbManager.ACTION_USB_DEVICE_DETACHED->extra(i)?.let{StreamLog.add("USB device ${it.productName?:it.deviceName} unplugged (${it.deviceName})");lastDetach[keyOf(it)]=android.os.SystemClock.elapsedRealtime();remove(it);if(askingPermissionFor==it.deviceId)permissionAnswered()}
+        ACTION_USB_PERMISSION->{extra(i)?.let{if(i.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED,false))openAndRegister(it)};permissionAnswered()}
+    }}.onFailure{StreamLog.add("USB event ${i.action?.substringAfterLast('.')} failed: ${it.javaClass.simpleName}: ${it.message}")}}}
+    private fun extra(i:Intent):UsbDevice?=if(Build.VERSION.SDK_INT>=33)i.getParcelableExtra(UsbManager.EXTRA_DEVICE,UsbDevice::class.java) else @Suppress("DEPRECATION") i.getParcelableExtra(UsbManager.EXTRA_DEVICE)
+
+    fun initialize(){if(!receiverRegistered){val f=IntentFilter().apply{addAction(UsbManager.ACTION_USB_DEVICE_ATTACHED);addAction(UsbManager.ACTION_USB_DEVICE_DETACHED);addAction(ACTION_USB_PERMISSION)};context.registerReceiver(receiver,f,Context.RECEIVER_NOT_EXPORTED);receiverRegistered=true};rescan()}
+    /** Looks at every connected device again, and asks for any missing USB permissions (one dialog at a time). */
+    fun rescan(){usb.deviceList.values.forEach(::requestOrOpen)}
+    @Synchronized fun shutdown(){audioSessions.keys.toList().forEach(::stopAudioLocked);audioErrors.clear();uacCapable.clear();sessions.values.forEach{runCatching{it.stop()}};sessions.clear();sessionSignatures.clear();connections.values.forEach{runCatching{it.close()}};connections.clear();_devices.value=emptyList();updateBudget();if(receiverRegistered){runCatching{context.unregisterReceiver(receiver)};receiverRegistered=false}}
+
+    // Android shows one USB permission dialog at a time and drops requests made while one is open, which is why
+    // only one of several cameras used to appear. Requests are queued and the next is asked after each answer.
+    private val permissionQueue=ArrayDeque<UsbDevice>()
+    @Volatile private var askingPermissionFor:Int?=null
+    private fun requestOrOpen(device:UsbDevice){if(!isInteresting(device))return;if(usb.hasPermission(device))openAndRegister(device)else synchronized(permissionQueue){if(askingPermissionFor!=device.deviceId&&permissionQueue.none{it.deviceId==device.deviceId})permissionQueue.addLast(device);askNextPermission()}}
+    private fun askNextPermission(){synchronized(permissionQueue){if(askingPermissionFor!=null)return;val next=permissionQueue.removeFirstOrNull()?:return;if(usb.deviceList.values.none{it.deviceId==next.deviceId}||usb.hasPermission(next)){if(usb.hasPermission(next))openAndRegister(next);askNextPermission();return};askingPermissionFor=next.deviceId;val pi=PendingIntent.getBroadcast(context,next.deviceId,Intent(ACTION_USB_PERMISSION).setPackage(context.packageName),PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_MUTABLE);usb.requestPermission(next,pi)}}
+    private fun permissionAnswered(){synchronized(permissionQueue){askingPermissionFor=null};askNextPermission()}
+    private fun openAndRegister(device:UsbDevice){if(_devices.value.any{it.deviceId==device.deviceId})return;val c=usb.openDevice(device)?:return
+        try{openAndRegisterWith(device,c)}catch(t:Throwable){connections.remove(device.deviceId);runCatching{c.close()};StreamLog.add("USB device ${device.productName?:device.deviceName}: could not be opened (${t.javaClass.simpleName}: ${t.message}); it may have been unplugged")}}
+    private fun openAndRegisterWith(device:UsbDevice,c:UsbDeviceConnection){val type=classify(device);if(type==UsbDeviceType.UNKNOWN){c.close();return};connections[device.deviceId]=c;val formats=if(type==UsbDeviceType.AUDIO_INPUT)emptyList() else UvcCaptureSession.listFormats(device,c).map{"${it.width}x${it.height}@${it.fps}:${it.codec}"}.distinct();val info=UsbDeviceInfo(device.deviceId,device.deviceName,displayName(device,type),device.vendorId,device.productId,device.manufacturerName,device.productName,runCatching{device.serialNumber}.getOrNull(),type,detectSpeed(c,device),0,true,false,"","",formats,0,type==UsbDeviceType.COMPOSITE_AV||type==UsbDeviceType.AUDIO_INPUT);_devices.value=_devices.value+info;updateBudget();Timber.i("USB registered: ${info.displayName}; formats=${formats.size}")}
+    @Synchronized private fun dropUnresponsive(deviceId:Int,session:UvcCaptureSession){
+        if(sessions[deviceId]!==session)return
+        val name=_devices.value.firstOrNull{it.deviceId==deviceId}?.displayName?:"device $deviceId"
+        StreamLog.add("USB device $name: closed after it stopped answering (it comes back when replugged)")
+        stopAudioLocked(deviceId);sessions.remove(deviceId)?.let{runCatching{it.stop()}};sessionSignatures.remove(deviceId)
+        connections.remove(deviceId)?.let{runCatching{it.close()}};_devices.value=_devices.value.filterNot{it.deviceId==deviceId};updateBudget()
+    }
+    @Synchronized private fun remove(device:UsbDevice){stopAudioLocked(device.deviceId);audioErrors.remove(device.deviceId);uacCapable.remove(device.deviceId);sessions.remove(device.deviceId)?.stop();sessionSignatures.remove(device.deviceId);connections.remove(device.deviceId)?.close();_devices.value=_devices.value.filterNot{it.deviceId==device.deviceId};updateBudget()}
+
+    // Video (14) and audio (1) only. Mice, keyboards and other HID devices work through Android itself; asking for access to
+    // them only put a permission prompt up every time the dock reconnected.
+    private fun isInteresting(d:UsbDevice):Boolean{for(i in 0 until d.interfaceCount){val c=d.getInterface(i).interfaceClass;if(c==14||c==1)return true};return d.vendorId in CAPTURE_CARD_VENDORS.keys||d.vendorId in AUDIO_INTERFACE_VENDORS.keys}
+    private fun classify(d:UsbDevice):UsbDeviceType{var v=false;var a=false;var h=false;for(i in 0 until d.interfaceCount){when(d.getInterface(i).interfaceClass){14->v=true;1->a=true;3->h=true}};return when{v&&a&&d.vendorId in CAPTURE_CARD_VENDORS->UsbDeviceType.COMPOSITE_AV;v&&d.vendorId in CAPTURE_CARD_VENDORS->UsbDeviceType.CAPTURE_CARD;v->UsbDeviceType.VIDEO_CAMERA;a->UsbDeviceType.AUDIO_INPUT;h->UsbDeviceType.HID_CONTROLLER;d.vendorId in AUDIO_INTERFACE_VENDORS->UsbDeviceType.AUDIO_INPUT;else->UsbDeviceType.UNKNOWN}}
+    private fun displayName(d:UsbDevice,t:UsbDeviceType)=d.productName?:when(t){UsbDeviceType.CAPTURE_CARD->"USB Capture Card";UsbDeviceType.VIDEO_CAMERA->"USB Camera";UsbDeviceType.COMPOSITE_AV->"USB A/V Capture Device";UsbDeviceType.AUDIO_INPUT->"USB Audio Input";UsbDeviceType.HID_CONTROLLER->"USB Controller";else->d.deviceName}
+    // The negotiated link speed from the kernel (what the dock / cable / port actually gave this device), logged so a
+    // camera or capture card that fell back to a slower link is visible; the descriptor only says what it supports.
+    private fun detectSpeed(c:UsbDeviceConnection,device:UsbDevice):UsbSpeed{
+        val linked=when(runCatching{NativeUsbBulk.linkSpeed(c.fileDescriptor)}.getOrDefault(-1)){1,2->UsbSpeed.USB_1_1;3->UsbSpeed.USB_2_0;5->UsbSpeed.USB_3_0;6->UsbSpeed.USB_3_2_GEN2;else->null}
+        val speed=linked?:detectSpeedFromDescriptor(c)
+        StreamLog.add("USB device ${device.productName?:device.deviceName}: link ${speed.displayName}${if(linked==null)" (from its descriptor)" else ""}")
+        return speed
+    }
+    private fun detectSpeedFromDescriptor(c:UsbDeviceConnection):UsbSpeed{val r=c.rawDescriptors?:return UsbSpeed.UNKNOWN;if(r.size>=4){val bcd=(r[2].toInt() and 0xFF) or ((r[3].toInt() and 0xFF) shl 8);return when{bcd>=0x0300->UsbSpeed.USB_3_0;bcd>=0x0200->UsbSpeed.USB_2_0;else->UsbSpeed.USB_1_1}};return UsbSpeed.UNKNOWN}
+
+    private val lastErrors=java.util.concurrent.ConcurrentHashMap<Int,String>()
+    /** Why the last capture start on [deviceId] failed, in words a user can act on. */
+    fun lastError(deviceId:Int):String? = lastErrors[deviceId]
+    @Synchronized fun startCapture(deviceId:Int,width:Int,height:Int,fps:Int,format:String,sourceId:String="usb_$deviceId",sourceConfigJson:String="{}"):Boolean{
+        val info=_devices.value.find{it.deviceId==deviceId}?:return false;val conn=connections[deviceId]?:return false;if(info.deviceType==UsbDeviceType.AUDIO_INPUT)return false
+        val cfg=runCatching{JSONObject(sourceConfigJson).let{it.optJSONObject("settings")?:it}}.getOrDefault(JSONObject())
+        val signature="$sourceId|$width|$height|$fps|$format|${cfg.optString("videoDecoderPreference","hardware")}"
+        if(sessions[deviceId]!=null&&sessionSignatures[deviceId]==signature)return true
+        val bw=estimateBandwidth(width,height,fps,format)
+        val replacingBandwidth=if(sessions[deviceId]!=null)info.estimatedBandwidthMbps else 0
+        // No bandwidth pre-check: the camera and Android negotiate the USB bandwidth during UVC start, and a
+        // format that truly does not fit fails there with the real reason.
+        return runCatching{
+            sessions.remove(deviceId)?.stop()
+            val s=UvcCaptureSession(usb.deviceList.values.first{it.deviceId==deviceId},conn,sourceId,width,height,fps,format,sourceConfigJson)
+            // A camera that stopped answering is closed and dropped from the list, so a replugged (newer) device with the
+            // same identity takes over instead of the app streaming at a ghost.
+            s.onDead={dropUnresponsive(deviceId,s)}
+            try{s.start()}catch(error:Throwable){runCatching{s.stop()};throw error}
+            sessions[deviceId]=s
+            sessionSignatures[deviceId]=signature
+            lastErrors.remove(deviceId)
+            _devices.value=_devices.value.map{if(it.deviceId==deviceId)it.copy(isCapturing=true,currentFormat="${width}x${height}@${fps}:$format",transport=s.transport(),estimatedBandwidthMbps=bw)else it};updateBudget();true
+        }.onFailure{Timber.e(it,"UVC capture start failed for $deviceId");lastErrors[deviceId]=it.message?:it.javaClass.simpleName;sessions.remove(deviceId)?.let{runCatching{it.stop()}};sessionSignatures.remove(deviceId);_devices.value=_devices.value.map{if(it.deviceId==deviceId)it.copy(isCapturing=false,currentFormat="",transport="",estimatedBandwidthMbps=0)else it};updateBudget()}.getOrDefault(false)
+    }
+
+    @Synchronized fun videoControls(deviceId:Int):List<UvcVideoControl>{
+        val device=usb.deviceList.values.firstOrNull{it.deviceId==deviceId}?:return emptyList()
+        val connection=connections[deviceId]?:return emptyList()
+        return runCatching{UvcVideoControls.list(connection)}.getOrDefault(emptyList())
+    }
+
+    @Synchronized fun setVideoControl(deviceId:Int,key:String,value:Int):Boolean{
+        val device=usb.deviceList.values.firstOrNull{it.deviceId==deviceId}?:return false
+        val connection=connections[deviceId]?:return false
+        return runCatching{UvcVideoControls.set(connection,key,value)}.getOrDefault(false)
+    }
+
+    private fun UvcCaptureSession.transport():String = currentTransport()
+
+    @Synchronized fun stopCapture(deviceId:Int){sessions.remove(deviceId)?.stop();sessionSignatures.remove(deviceId);_devices.value=_devices.value.map{if(it.deviceId==deviceId)it.copy(isCapturing=false,currentFormat="",transport="",estimatedBandwidthMbps=0)else it};updateBudget()}
+    // Direct USB microphone capture (UsbAudioCapture over usbfs), one per device: Android's audio policy on the Astra opens
+    // only one USB input at a time, so a second USB mic is read like UVC video. Each capture gets its own connection (fd):
+    // usbfs reaps completed transfers per fd, and a UVC stream reaping on the shared fd would take the microphone's.
+    private val audioSessions=mutableMapOf<Int,UsbAudioCapture>()
+    private val audioSignatures=mutableMapOf<Int,String>()
+    private val audioConnections=mutableMapOf<Int,UsbDeviceConnection>()
+    private val audioErrors=java.util.concurrent.ConcurrentHashMap<Int,String>()
+    private val uacCapable=java.util.concurrent.ConcurrentHashMap<Int,Boolean>()
+    /** Why the last microphone capture start on [deviceId] failed, in words a user can act on. */
+    fun audioError(deviceId:Int):String? = audioErrors[deviceId]
+    /** "48000 Hz · 2 ch · 16-bit · UAC1" while [deviceId]'s microphone is captured, else null. */
+    @Synchronized fun audioCaptureInfo(deviceId:Int):String? = audioSessions[deviceId]?.info()
+    /** Connected devices with a USB Audio Class capture stream the app can read itself. */
+    @Synchronized fun audioCaptureDevices():List<UsbDeviceInfo> = _devices.value.filter{d->connections[d.deviceId]?.let{c->uacCapable.getOrPut(d.deviceId){runCatching{UacDescriptors.hasCapture(c.rawDescriptors)}.getOrDefault(false)}}==true}
+    /**
+     * Captures [deviceId]'s microphone into the mixer's external input [mixerInputId] (add it through NativeAudioGraph's
+     * external routes). Null on success, else the reason (also kept for [audioError]). A running capture with the same
+     * input and rate is left alone.
+     */
+    /** Test switch (adb: am start -n com.stream4k60.app/.MainActivity --es usbaudio off|on): the app's own USB mic capture off. */
+    @Volatile private var nativeAudioOff=false
+    @Synchronized fun setNativeAudioDisabled(off:Boolean){nativeAudioOff=off;if(off)audioSessions.keys.toList().forEach{stopAudioCapture(it)};StreamLog.add("USB mic capture by the app ${if(off)"OFF (test)" else "on"}")}
+    @Synchronized fun startAudioCapture(deviceId:Int,mixerInputId:String,preferredRate:Int=48000):String?{if(nativeAudioOff)return "USB mic capture is off (test switch)"
+        NativeAudioGraph.currentHandle().takeIf{it!=0L}?.let(NativeUsbAudio::setMixer)
+        val signature="$mixerInputId|$preferredRate"
+        if(audioSessions[deviceId]!=null&&audioSignatures[deviceId]==signature)return null
+        stopAudioLocked(deviceId)
+        val failure=runCatching{
+            val device=usb.deviceList.values.firstOrNull{it.deviceId==deviceId}?:error("The USB device is no longer connected")
+            val shared=connections[deviceId]?:error("The app has no USB access to ${device.productName?:device.deviceName} yet")
+            val own=runCatching{usb.openDevice(device)}.getOrNull()
+            // Sharing the fd is only safe when no UVC stream can ever reap on it.
+            check(own!=null||(0 until device.interfaceCount).none{device.getInterface(it).interfaceClass==14}){"Android would not open a second connection to ${device.productName?:device.deviceName} for its microphone"}
+            val capture=UsbAudioCapture(device,own?:shared,mixerInputId,preferredRate)
+            try{capture.start()}catch(t:Throwable){runCatching{capture.stop()};own?.let{runCatching{it.close()}};throw t}
+            audioSessions[deviceId]=capture;audioSignatures[deviceId]=signature;own?.let{audioConnections[deviceId]=it}
+        }.exceptionOrNull()
+        if(failure==null){audioErrors.remove(deviceId);_devices.value=_devices.value.map{if(it.deviceId==deviceId)it.copy(audioSourceId=mixerInputId)else it};return null}
+        val message=failure.message?:failure.javaClass.simpleName
+        Timber.e(failure,"USB audio capture start failed for $deviceId");StreamLog.add("USB mic $deviceId could not start: $message")
+        audioErrors[deviceId]=message;return message
+    }
+    @Synchronized fun stopAudioCapture(deviceId:Int){stopAudioLocked(deviceId);audioErrors.remove(deviceId);_devices.value=_devices.value.map{if(it.deviceId==deviceId)it.copy(audioSourceId=null)else it}}
+    // Before any connection closes: the capture still has to put the interface back (alt 0, release, kernel driver).
+    private fun stopAudioLocked(deviceId:Int){audioSessions.remove(deviceId)?.let{runCatching{it.stop()}};audioSignatures.remove(deviceId);audioConnections.remove(deviceId)?.let{runCatching{it.close()}}}
+
+    private fun updateBudget(){val used=_devices.value.sumOf{it.estimatedBandwidthMbps};val total=when(_devices.value.maxOfOrNull{it.usbSpeed.bandwidthMbps}?:5000){in 10000..Int.MAX_VALUE->10000;in 5000..9999->5000;else->480};_budget.value=UsbBandwidthBudget(total,used,(total-used).coerceAtLeast(0),_devices.value)}
+}

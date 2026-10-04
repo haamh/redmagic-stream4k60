@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- USB devices the studio handles. Android offers "Always open Stream4k60 for this device", which also remembers the
+     USB permission, so cameras, capture cards and microphones don't need it granted again after every replug. -->
+<resources>
+    <!-- Video (UVC): webcams and capture cards. -->
+    <usb-device class="14" />
+    <!-- Audio (UAC): microphones and the audio of capture cards and webcams. -->
+    <usb-device class="1" />
+</resources>

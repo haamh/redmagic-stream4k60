@@ -64,7 +64,12 @@ class NativeUsbManager @Inject constructor(@ApplicationContext private val conte
         UsbManager.ACTION_USB_DEVICE_ATTACHED->extra(i)?.let{d->
             val recent=lastDetach[keyOf(d)]?.let{android.os.SystemClock.elapsedRealtime()-it<10_000}==true
             if(recent)StreamLog.add("USB device ${d.productName?:d.deviceName} came back within 10 s of dropping off: waiting until it stays connected")
-            scope.launch{delay(if(recent)4000 else 1500);if(usb.deviceList.values.any{it.deviceId==d.deviceId})runCatching{requestOrOpen(d)}}}
+            val identity=keyOf(d)
+            scope.launch {
+                delay(if(recent)4000 else 1500)
+                val current=usb.deviceList.values.firstOrNull { keyOf(it)==identity }
+                current?.let { runCatching { requestOrOpen(it) } }
+            }}
         UsbManager.ACTION_USB_DEVICE_DETACHED->extra(i)?.let{StreamLog.add("USB device ${it.productName?:it.deviceName} unplugged (${it.deviceName})");lastDetach[keyOf(it)]=android.os.SystemClock.elapsedRealtime();remove(it);if(askingPermissionFor==it.deviceId)permissionAnswered()}
         ACTION_USB_PERMISSION->{extra(i)?.let{if(i.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED,false))openAndRegister(it)};permissionAnswered()}
     }}.onFailure{StreamLog.add("USB event ${i.action?.substringAfterLast('.')} failed: ${it.javaClass.simpleName}: ${it.message}")}}}
@@ -92,7 +97,17 @@ class NativeUsbManager @Inject constructor(@ApplicationContext private val conte
         stopAudioLocked(deviceId);sessions.remove(deviceId)?.let{runCatching{it.stop()}};sessionSignatures.remove(deviceId)
         connections.remove(deviceId)?.let{runCatching{it.close()}};_devices.value=_devices.value.filterNot{it.deviceId==deviceId};updateBudget()
     }
-    @Synchronized private fun remove(device:UsbDevice){stopAudioLocked(device.deviceId);audioErrors.remove(device.deviceId);uacCapable.remove(device.deviceId);sessions.remove(device.deviceId)?.stop();sessionSignatures.remove(device.deviceId);connections.remove(device.deviceId)?.close();_devices.value=_devices.value.filterNot{it.deviceId==device.deviceId};updateBudget()}
+    @Synchronized private fun remove(device:UsbDevice){
+        // This callback means the physical device is already gone. Tear down native URBs first, but never send
+        // SET_INTERFACE/USBDEVFS_CONNECT/rebind requests against the detached device.
+        stopAudioLocked(device.deviceId, true)
+        audioErrors.remove(device.deviceId);uacCapable.remove(device.deviceId)
+        sessions.remove(device.deviceId)?.stop(deviceGone = true)
+        sessionSignatures.remove(device.deviceId)
+        connections.remove(device.deviceId)?.let { runCatching { it.close() } }
+        _devices.value=_devices.value.filterNot{it.deviceId==device.deviceId}
+        updateBudget()
+    }
 
     // Video (14) and audio (1) only. Mice, keyboards and other HID devices work through Android itself; asking for access to
     // them only put a permission prompt up every time the dock reconnected.
@@ -194,7 +209,11 @@ class NativeUsbManager @Inject constructor(@ApplicationContext private val conte
     }
     @Synchronized fun stopAudioCapture(deviceId:Int){stopAudioLocked(deviceId);audioErrors.remove(deviceId);_devices.value=_devices.value.map{if(it.deviceId==deviceId)it.copy(audioSourceId=null)else it}}
     // Before any connection closes: the capture still has to put the interface back (alt 0, release, kernel driver).
-    private fun stopAudioLocked(deviceId:Int){audioSessions.remove(deviceId)?.let{runCatching{it.stop()}};audioSignatures.remove(deviceId);audioConnections.remove(deviceId)?.let{runCatching{it.close()}}}
+    private fun stopAudioLocked(deviceId:Int, deviceGone:Boolean = false){
+        audioSessions.remove(deviceId)?.let{runCatching{it.stop(deviceGone)}}
+        audioSignatures.remove(deviceId)
+        audioConnections.remove(deviceId)?.let{runCatching{it.close()}}
+    }
 
     private fun updateBudget(){val used=_devices.value.sumOf{it.estimatedBandwidthMbps};val total=when(_devices.value.maxOfOrNull{it.usbSpeed.bandwidthMbps}?:5000){in 10000..Int.MAX_VALUE->10000;in 5000..9999->5000;else->480};_budget.value=UsbBandwidthBudget(total,used,(total-used).coerceAtLeast(0),_devices.value)}
 }

@@ -187,6 +187,10 @@ extern "C" JNIEXPORT jboolean JNICALL Java_com_stream4k60_app_engine_NativeAudio
     std::shared_ptr<stream4k60::NativeAudioMixer> m;{std::lock_guard<std::mutex> l(um);auto it=audioMixers.find(handle);if(it==audioMixers.end())return JNI_FALSE;m=it->second;}
     return m->setInputGate(jstr(env,sourceId),enabled,openDb,closeDb,attackMs,holdMs,releaseMs)?JNI_TRUE:JNI_FALSE;
 }
+extern "C" JNIEXPORT jboolean JNICALL Java_com_stream4k60_app_engine_NativeAudioMixer_setInputGain(JNIEnv* env,jclass,jlong handle,jstring sourceId,jfloat gainDb){
+    std::shared_ptr<stream4k60::NativeAudioMixer> m;{std::lock_guard<std::mutex> l(um);auto it=audioMixers.find(handle);if(it==audioMixers.end())return JNI_FALSE;m=it->second;}
+    return m->setInputGain(jstr(env,sourceId),gainDb)?JNI_TRUE:JNI_FALSE;
+}
 extern "C" JNIEXPORT void JNICALL Java_com_stream4k60_app_engine_NativeAudioMixer_setMonitorVolume(JNIEnv*,jclass,jlong handle,jfloat volume){std::shared_ptr<stream4k60::NativeAudioMixer> m;{std::lock_guard<std::mutex> l(um);auto it=audioMixers.find(handle);if(it==audioMixers.end())return;m=it->second;}m->setMonitorVolume(volume);}
 extern "C" JNIEXPORT void JNICALL Java_com_stream4k60_app_engine_NativeAudioMixer_setMonitorMuted(JNIEnv*,jclass,jlong handle,jboolean muted){std::shared_ptr<stream4k60::NativeAudioMixer> m;{std::lock_guard<std::mutex> l(um);auto it=audioMixers.find(handle);if(it==audioMixers.end())return;m=it->second;}m->setMonitorMuted(muted);}
 extern "C" JNIEXPORT void JNICALL Java_com_stream4k60_app_engine_NativeAudioMixer_setMonitorOutput(JNIEnv*,jclass,jlong handle,jint format,jboolean bitPerfect){std::shared_ptr<stream4k60::NativeAudioMixer> m;{std::lock_guard<std::mutex> l(um);auto it=audioMixers.find(handle);if(it==audioMixers.end())return;m=it->second;}m->setMonitorOutput(format,bitPerfect==JNI_TRUE);}

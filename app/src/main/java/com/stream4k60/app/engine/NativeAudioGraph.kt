@@ -120,6 +120,11 @@ object NativeAudioGraph {
     fun stop() { synchronized(lock) { stopLocked() } }
 
     /** Applies a gate to a running input immediately, for live preview while editing filters. */
+    fun previewGain(inputId: String, gain: GainConfig?) = synchronized(lock) {
+        if (handle == 0L) return@synchronized
+        NativeAudioMixer.setInputGain(handle, inputId, gain?.gainDb ?: 0f)
+    }
+
     fun previewGate(inputId: String, gate: NoiseGateConfig?) = synchronized(lock) {
         if (handle == 0L) return@synchronized
         NativeAudioMixer.setInputGate(

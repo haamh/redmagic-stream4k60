@@ -353,14 +353,29 @@ class BitmapSourceController(private val context: Context, private val scope:Cor
                     BitmapFactory.decodeByteArray(bytes,0,bytes.size,options)
                 } finally { connection.disconnect() }
             } else {
-                val bounds=BitmapFactory.Options().apply{inJustDecodeBounds=true}
-                openBitmapInput(path)?.use{BitmapFactory.decodeStream(it,null,bounds)}
-                    ?: return@runCatching null
-                if(bounds.outWidth<=0||bounds.outHeight<=0)return@runCatching null
-                var sample=1
-                while((bounds.outWidth.toLong()/(sample*2L))*(bounds.outHeight.toLong()/(sample*2L))>MAX_DECODE_PIXELS)sample*=2
-                val options=BitmapFactory.Options().apply{inSampleSize=sample;inPreferredConfig=Bitmap.Config.ARGB_8888}
-                openBitmapInput(path)?.use{BitmapFactory.decodeStream(it,null,options)}
+                val localPath = when (uri.scheme?.lowercase()) {
+                    "file" -> uri.path
+                    "content" -> null
+                    else -> path
+                }
+                if (localPath != null) {
+                    val bounds=BitmapFactory.Options().apply{inJustDecodeBounds=true}
+                    BitmapFactory.decodeFile(localPath,bounds)
+                    if(bounds.outWidth<=0||bounds.outHeight<=0)return@runCatching null
+                    var sample=1
+                    while((bounds.outWidth.toLong()/(sample*2L))*(bounds.outHeight.toLong()/(sample*2L))>MAX_DECODE_PIXELS)sample*=2
+                    val options=BitmapFactory.Options().apply{inSampleSize=sample;inPreferredConfig=Bitmap.Config.ARGB_8888}
+                    BitmapFactory.decodeFile(localPath,options)
+                } else {
+                    val bounds=BitmapFactory.Options().apply{inJustDecodeBounds=true}
+                    openBitmapInput(path)?.use{BitmapFactory.decodeStream(it,null,bounds)}
+                        ?: return@runCatching null
+                    if(bounds.outWidth<=0||bounds.outHeight<=0)return@runCatching null
+                    var sample=1
+                    while((bounds.outWidth.toLong()/(sample*2L))*(bounds.outHeight.toLong()/(sample*2L))>MAX_DECODE_PIXELS)sample*=2
+                    val options=BitmapFactory.Options().apply{inSampleSize=sample;inPreferredConfig=Bitmap.Config.ARGB_8888}
+                    openBitmapInput(path)?.use{BitmapFactory.decodeStream(it,null,options)}
+                }
             }
         }.getOrNull()
     }

@@ -78,7 +78,7 @@ class NativeUsbManager @Inject constructor(@ApplicationContext private val conte
     fun initialize(){if(!receiverRegistered){val f=IntentFilter().apply{addAction(UsbManager.ACTION_USB_DEVICE_ATTACHED);addAction(UsbManager.ACTION_USB_DEVICE_DETACHED);addAction(ACTION_USB_PERMISSION)};context.registerReceiver(receiver,f,Context.RECEIVER_NOT_EXPORTED);receiverRegistered=true};rescan()}
     /** Looks at every connected device again, and asks for any missing USB permissions (one dialog at a time). */
     fun rescan(){usb.deviceList.values.forEach(::requestOrOpen)}
-    @Synchronized fun shutdown(){audioSessions.keys.toList().forEach(::stopAudioLocked);audioErrors.clear();uacCapable.clear();sessions.values.forEach{runCatching{it.stop()}};sessions.clear();sessionSignatures.clear();connections.values.forEach{runCatching{it.close()}};connections.clear();_devices.value=emptyList();updateBudget();if(receiverRegistered){runCatching{context.unregisterReceiver(receiver)};receiverRegistered=false}}
+    @Synchronized fun shutdown(){audioSessions.keys.toList().forEach{deviceId->stopAudioLocked(deviceId,deviceGone=!deviceCurrentlyConnected(deviceId))};audioErrors.clear();uacCapable.clear();sessions.keys.toList().forEach{deviceId->sessions.remove(deviceId)?.let{runCatching{it.stop(deviceGone=!deviceCurrentlyConnected(deviceId))}}};sessions.clear();sessionSignatures.clear();connections.values.forEach{runCatching{it.close()}};connections.clear();_devices.value=emptyList();updateBudget();if(receiverRegistered){runCatching{context.unregisterReceiver(receiver)};receiverRegistered=false}}
 
     // Android shows one USB permission dialog at a time and drops requests made while one is open, which is why
     // only one of several cameras used to appear. Requests are queued and the next is asked after each answer.
@@ -97,6 +97,8 @@ class NativeUsbManager @Inject constructor(@ApplicationContext private val conte
         stopAudioLocked(deviceId, true);sessions.remove(deviceId)?.let{runCatching{it.stop(deviceGone = true)}};sessionSignatures.remove(deviceId)
         connections.remove(deviceId)?.let{runCatching{it.close()}};_devices.value=_devices.value.filterNot{it.deviceId==deviceId};updateBudget()
     }
+    private fun deviceCurrentlyConnected(deviceId:Int):Boolean=usb.deviceList.values.any{it.deviceId==deviceId}
+
     @Synchronized private fun remove(device:UsbDevice){
         // This callback means the physical device is already gone. Tear down native URBs first, but never send
         // SET_INTERFACE/USBDEVFS_CONNECT/rebind requests against the detached device.
@@ -137,17 +139,17 @@ class NativeUsbManager @Inject constructor(@ApplicationContext private val conte
         // No bandwidth pre-check: the camera and Android negotiate the USB bandwidth during UVC start, and a
         // format that truly does not fit fails there with the real reason.
         return runCatching{
-            sessions.remove(deviceId)?.stop()
+            sessions.remove(deviceId)?.stop(deviceGone=!deviceCurrentlyConnected(deviceId))
             val s=UvcCaptureSession(usb.deviceList.values.first{it.deviceId==deviceId},conn,sourceId,width,height,fps,format,sourceConfigJson)
             // A camera that stopped answering is closed and dropped from the list, so a replugged (newer) device with the
             // same identity takes over instead of the app streaming at a ghost.
             s.onDead={dropUnresponsive(deviceId,s)}
-            try{s.start()}catch(error:Throwable){runCatching{s.stop()};throw error}
+            try{s.start()}catch(error:Throwable){runCatching{s.stop(deviceGone=!deviceCurrentlyConnected(deviceId))};throw error}
             sessions[deviceId]=s
             sessionSignatures[deviceId]=signature
             lastErrors.remove(deviceId)
             _devices.value=_devices.value.map{if(it.deviceId==deviceId)it.copy(isCapturing=true,currentFormat="${width}x${height}@${fps}:$format",transport=s.transport(),estimatedBandwidthMbps=bw)else it};updateBudget();true
-        }.onFailure{Timber.e(it,"UVC capture start failed for $deviceId");lastErrors[deviceId]=it.message?:it.javaClass.simpleName;sessions.remove(deviceId)?.let{runCatching{it.stop()}};sessionSignatures.remove(deviceId);_devices.value=_devices.value.map{if(it.deviceId==deviceId)it.copy(isCapturing=false,currentFormat="",transport="",estimatedBandwidthMbps=0)else it};updateBudget()}.getOrDefault(false)
+        }.onFailure{Timber.e(it,"UVC capture start failed for $deviceId");lastErrors[deviceId]=it.message?:it.javaClass.simpleName;sessions.remove(deviceId)?.let{runCatching{it.stop(deviceGone=!deviceCurrentlyConnected(deviceId))}};sessionSignatures.remove(deviceId);_devices.value=_devices.value.map{if(it.deviceId==deviceId)it.copy(isCapturing=false,currentFormat="",transport="",estimatedBandwidthMbps=0)else it};updateBudget()}.getOrDefault(false)
     }
 
     @Synchronized fun videoControls(deviceId:Int):List<UvcVideoControl>{
@@ -164,7 +166,7 @@ class NativeUsbManager @Inject constructor(@ApplicationContext private val conte
 
     private fun UvcCaptureSession.transport():String = currentTransport()
 
-    @Synchronized fun stopCapture(deviceId:Int){sessions.remove(deviceId)?.stop();sessionSignatures.remove(deviceId);_devices.value=_devices.value.map{if(it.deviceId==deviceId)it.copy(isCapturing=false,currentFormat="",transport="",estimatedBandwidthMbps=0)else it};updateBudget()}
+    @Synchronized fun stopCapture(deviceId:Int){sessions.remove(deviceId)?.stop(deviceGone=!deviceCurrentlyConnected(deviceId));sessionSignatures.remove(deviceId);_devices.value=_devices.value.map{if(it.deviceId==deviceId)it.copy(isCapturing=false,currentFormat="",transport="",estimatedBandwidthMbps=0)else it};updateBudget()}
     // Direct USB microphone capture (UsbAudioCapture over usbfs), one per device: Android's audio policy on the Astra opens
     // only one USB input at a time, so a second USB mic is read like UVC video. Each capture gets its own connection (fd):
     // usbfs reaps completed transfers per fd, and a UVC stream reaping on the shared fd would take the microphone's.
@@ -199,7 +201,7 @@ class NativeUsbManager @Inject constructor(@ApplicationContext private val conte
             // Sharing the fd is only safe when no UVC stream can ever reap on it.
             check(own!=null||(0 until device.interfaceCount).none{device.getInterface(it).interfaceClass==14}){"Android would not open a second connection to ${device.productName?:device.deviceName} for its microphone"}
             val capture=UsbAudioCapture(device,own?:shared,mixerInputId,preferredRate)
-            try{capture.start()}catch(t:Throwable){runCatching{capture.stop()};own?.let{runCatching{it.close()}};throw t}
+            try{capture.start()}catch(t:Throwable){runCatching{capture.stop(deviceGone=!deviceCurrentlyConnected(deviceId))};own?.let{runCatching{it.close()}};throw t}
             audioSessions[deviceId]=capture;audioSignatures[deviceId]=signature;own?.let{audioConnections[deviceId]=it}
         }.exceptionOrNull()
         if(failure==null){audioErrors.remove(deviceId);_devices.value=_devices.value.map{if(it.deviceId==deviceId)it.copy(audioSourceId=mixerInputId)else it};return null}
@@ -207,7 +209,7 @@ class NativeUsbManager @Inject constructor(@ApplicationContext private val conte
         Timber.e(failure,"USB audio capture start failed for $deviceId");StreamLog.add("USB mic $deviceId could not start: $message")
         audioErrors[deviceId]=message;return message
     }
-    @Synchronized fun stopAudioCapture(deviceId:Int){stopAudioLocked(deviceId);audioErrors.remove(deviceId);_devices.value=_devices.value.map{if(it.deviceId==deviceId)it.copy(audioSourceId=null)else it}}
+    @Synchronized fun stopAudioCapture(deviceId:Int){stopAudioLocked(deviceId,deviceGone=!deviceCurrentlyConnected(deviceId));audioErrors.remove(deviceId);_devices.value=_devices.value.map{if(it.deviceId==deviceId)it.copy(audioSourceId=null)else it}}
     // Before any connection closes: the capture still has to put the interface back (alt 0, release, kernel driver).
     private fun stopAudioLocked(deviceId:Int, deviceGone:Boolean = false){
         audioSessions.remove(deviceId)?.let{runCatching{it.stop(deviceGone)}}

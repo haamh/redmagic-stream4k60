@@ -402,7 +402,9 @@ aaudio_data_callback_result_t NativeAudioMixer::monitorCallback(AAudioStream*,vo
 // whenever any one source had data, so two sources arriving at different moments became extra half-mixed blocks
 // (faster than real time: the encoder queue overflowed and dropped audio) and each source sounded chopped.
 void NativeAudioMixer::mixLoop(){
-    constexpr uint64_t kMixLatencyUs=50000;
+    // Keep only 10 ms of scheduling slack. USB UAC is already packetized at millisecond scale and the monitor
+    // AAudio buffer is separately constrained to two device bursts below; 50 ms here directly became audible delay.
+    constexpr uint64_t kMixLatencyUs=10000;
     std::vector<float>program(static_cast<size_t>(blockFrames_)*2),monitor(static_cast<size_t>(blockFrames_)*2),tmp(static_cast<size_t>(blockFrames_)*2);
     // Peak-envelope decay for the gate's close detection (~50 ms time constant).
     const float gateLevelDecay=std::exp(-1.f/(0.05f*static_cast<float>(sampleRate_)));

@@ -81,7 +81,7 @@ class UsbAudioCapture(private val device: UsbDevice, private val connection: Usb
 
     fun stats(): String = handle.takeIf { it != 0L }?.let(NativeUsbAudio::stats).orEmpty()
 
-    fun stop() {
+    fun stop(deviceGone: Boolean = false) {
         statsThread?.interrupt(); statsThread = null
         val h = handle; handle = 0L
         if (h != 0L) { runCatching { StreamLog.add("USB mic $name stopped: ${NativeUsbAudio.stats(h)}") }; runCatching { NativeUsbAudio.stop(h) } }

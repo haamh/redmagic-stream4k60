@@ -324,7 +324,13 @@ class UvcCaptureSession(
         decodeThread = null
         decodeQueue.clear()
         runCatching { decoder?.stop() }; runCatching { decoder?.release() }; decoder = null
-        streamInterface?.let { runCatching { connection.releaseInterface(it) } }
+        if (!deviceGone) {
+            // The physical device is still present: release our userspace interface claim normally.
+            streamInterface?.let { runCatching { connection.releaseInterface(it) } }
+        } else {
+            // Device is physically gone: do not issue further USB interface I/O on the dead connection.
+            StreamLog.add("USB source ${sourceId.take(8)}: device detached; skipped interface release")
+        }
         streamInterface = null; endpoint = null
         runCatching { surface?.release() }; surface = null
         runCatching { NativeEngine.releaseSourceSurface(sourceId) }

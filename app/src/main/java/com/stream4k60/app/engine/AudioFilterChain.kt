@@ -9,6 +9,7 @@ import java.util.UUID
  * Filters run natively on the 48 kHz program bus before volume/pan.
  */
 enum class AudioFilterType(val label: String) {
+    GAIN("Gain"),
     NOISE_GATE("Noise Gate");
 
     companion object {
@@ -30,6 +31,7 @@ data class AudioFilterStage(
     companion object {
         /** OBS noise-gate defaults. `closeFollowsOpen` keeps the close threshold 6 dB below "start listening at". */
         fun defaultSettings(type: AudioFilterType): Map<String, Any> = when (type) {
+            AudioFilterType.GAIN -> mapOf("gainDb" to 0.0)
             AudioFilterType.NOISE_GATE -> mapOf(
                 "openDb" to -26.0, "closeDb" to -32.0, "closeFollowsOpen" to true,
                 "attackMs" to 25.0, "holdMs" to 200.0, "releaseMs" to 150.0
@@ -37,6 +39,9 @@ data class AudioFilterStage(
         }
     }
 }
+
+/** Resolved per-source Gain parameters for the native mixer. */
+data class GainConfig(val gainDb: Float = 0f)
 
 /** Resolved noise-gate parameters for the native mixer. */
 data class NoiseGateConfig(
@@ -48,6 +53,8 @@ data class NoiseGateConfig(
 )
 
 object AudioFilterChain {
+    const val GAIN_MIN_DB = -30f
+    const val GAIN_MAX_DB = 30f
     const val GATE_HYSTERESIS_DB = 6f
 
     /** Source types whose audio passes through the native mixer and can take audio filters. */
@@ -94,6 +101,15 @@ object AudioFilterChain {
         if (target !== root) root.put("settings", target)
         return root.toString()
     }
+
+    /** The active Gain: the first enabled Gain filter, or null. */
+  fun gain(stages: List<AudioFilterStage>): GainConfig? =
+        stages.firstOrNull { it.enabled && it.type == AudioFilterType.GAIN }?.let(::gainConfig)
+
+    fun gain(configJson: String): GainConfig? = gain(read(configJson))
+
+    fun gainConfig(stage: AudioFilterStage): GainConfig =
+        GainConfig(stage.float("gainDb").coerceIn(GAIN_MIN_DB, GAIN_MAX_DB))
 
     /** The active gate: the first enabled Noise Gate, or null. */
     fun noiseGate(stages: List<AudioFilterStage>): NoiseGateConfig? =

@@ -89,7 +89,10 @@ internal fun TextSourceOptions(sourceName: String, imported: Boolean, settings: 
     CheckField("Vertical", style.vertical, "Characters run top to bottom; each line becomes a column, right to left.") { set("vertical", it) }
 
     OptionSection("Rolling text")
-    CheckField("Rolling text", style.rolling, "Keeps a compact curved window while the text rolls inside it. The text and box move and resize as one source.") { set("rollingText", it) }
+    CheckField("Rolling text", style.rolling, "Keeps a compact curved window while the text rolls inside it. The text and box move and resize as one source.") {
+        set("rollingText", it)
+        if (it) set("useCustomExtents", false)
+    }
     if (style.rolling) {
         SliderField("Window width", style.rollingWidth, 64..4096, " px") { set("rollingWidth", it) }
         SliderField("Window height", style.rollingHeight, 0..1024, " px (0 = fit text)") { set("rollingHeight", it) }

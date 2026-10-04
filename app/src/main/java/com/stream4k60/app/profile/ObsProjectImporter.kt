@@ -373,6 +373,17 @@ class ObsProjectImporter(private val context: Context) {
                 "sharpen_filter" -> "SHARPEN" to buildJsonObject {
                     put("sharpness", settings.number("sharpness", 0.08).coerceIn(0.0, 1.0))
                 }
+                "gain_filter" -> {
+                    val gain = settings.number("db", settings.number("gain_db", 0.0)).coerceIn(-30.0, 30.0)
+                    audioStages += buildJsonObject {
+                        put("id", UUID.randomUUID().toString())
+                        put("type", "GAIN")
+                        put("name", name)
+                        put("enabled", enabled)
+                        put("settings", buildJsonObject { put("gainDb", gain) })
+                    }
+                    return@forEachIndexed
+                }
                 "noise_gate_filter" -> {
                     val open = settings.number("open_threshold", -26.0).coerceIn(-96.0, 0.0)
                     val close = settings.number("close_threshold", -32.0).coerceIn(-96.0, open)

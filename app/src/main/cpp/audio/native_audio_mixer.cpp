@@ -47,8 +47,11 @@ size_t NativeAudioMixer::Ring::popUpTo(float*dst,size_t frames){
 bool NativeAudioMixer::Ring::pop(float*dst,size_t frames){if(!dst||availableFrames()<frames)return false;return popUpTo(dst,frames)==frames;}
 uint64_t NativeAudioMixer::Ring::startPtsUs()const{return startPts.load(std::memory_order_acquire);}void NativeAudioMixer::Ring::clear(){head.store(0);tail.store(0);startPts.store(0);}
 
-NativeAudioMixer::NativeAudioMixer(JavaVM* vm,jobject callback,int sr,int ch,int block,int monitorDevice,bool monitorEnabled)
+NativeAudioMixer::NativeAudioMixer(JavaVM* vm,jobject callback,int sr,int ch,int block,int monitorDevice,bool monitorEnabled,int monitorFormat,bool monitorBitPerfect)
 :vm_(vm),sampleRate_(std::max(8000,sr)),channels_(ch==1?1:2),blockFrames_(std::max(48,block)),monitorDeviceId_(monitorDevice),monitorEnabled_(monitorEnabled){
+    if(monitorFormat!=AAUDIO_FORMAT_PCM_I16&&monitorFormat!=AAUDIO_FORMAT_PCM_I24_PACKED&&monitorFormat!=AAUDIO_FORMAT_PCM_I32)monitorFormat=AAUDIO_FORMAT_PCM_FLOAT;
+    monitorFormat_=monitorFormat;
+    monitorBitPerfect_=monitorBitPerfect;
     JNIEnv* env=nullptr;if(vm_&&vm_->GetEnv(reinterpret_cast<void**>(&env),JNI_VERSION_1_6)==JNI_OK&&callback){callback_=env->NewGlobalRef(callback);jclass cls=env->GetObjectClass(callback_);if(cls)callbackMethod_=env->GetMethodID(cls,"onMixed","(Ljava/nio/ByteBuffer;JIII)V");}
 }
 NativeAudioMixer::~NativeAudioMixer(){stop();if(vm_&&callback_){JNIEnv* env=nullptr;bool a=false;if(vm_->GetEnv(reinterpret_cast<void**>(&env),JNI_VERSION_1_6)!=JNI_OK){if(vm_->AttachCurrentThread(&env,nullptr)==JNI_OK)a=true;}if(env)env->DeleteGlobalRef(callback_);if(a)vm_->DetachCurrentThread();callback_=nullptr;callbackMethod_=nullptr;}}

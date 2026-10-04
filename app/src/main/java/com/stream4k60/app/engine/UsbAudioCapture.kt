@@ -92,8 +92,17 @@ class UsbAudioCapture(private val device: UsbDevice, private val connection: Usb
             StreamLog.add("USB mic $name: device detached; skipped interface reset/rebind")
             return
         }
-        findInterface(intf.id, 0)?.let { runCatching { connection.setInterface(it) } }
-        runCatching { connection.releaseInterface(intf) }
+        val resetOk = findInterface(intf.id, 0)?.let { runCatching { connection.setInterface(it) }.getOrDefault(false) } ?: true
+        if (!resetOk) {
+            // A failed alt-0 reset can mean the device disappeared. Do not continue with another USB control path on it.
+            StreamLog.add("USB mic $name: interface reset failed; skipped release/rebind because the USB connection may be gone")
+            return
+        }
+        val releaseOk = runCatching { connection.releaseInterface(intf) }.getOrDefault(false)
+        if (!releaseOk) {
+            StreamLog.add("USB mic $name: interface release failed; skipped kernel rebind because the USB connection may be gone")
+            return
+        }
         if (runCatching { NativeUsbAudio.reattachKernelDriver(connection.fileDescriptor, intf.id) }.getOrDefault(false) != true)
             StreamLog.add("USB mic $name: interface ${intf.id} could not be handed back to the kernel audio driver")
     }

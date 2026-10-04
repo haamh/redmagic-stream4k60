@@ -61,7 +61,10 @@ inline bool reapOutstanding(int fd, std::atomic<int>& inFlight) {
         poll(&pfd, 1, 5);
         waitedMs += 5;
     }
-    return inFlight.load() <= 0 || errno == ENODEV;
+    // ENODEV only says the device is disconnected; do not assume every userspace URB object is
+    // already safe to free. If any URB is still outstanding, leak the user buffer until its fd is
+    // closed rather than risking the kernel writing through freed memory.
+    return inFlight.load() <= 0;
 }
 static_assert(sizeof(IsoPacketDesc) == 12, "Unexpected usbfs ISO packet ABI size");
 } // namespace stream4k60::usbfs

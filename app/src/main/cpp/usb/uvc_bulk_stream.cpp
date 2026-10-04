@@ -21,7 +21,7 @@ void UvcBulkStream::stop(){const bool wasRunning=running_.exchange(false);if(was
     else{for(auto&s:slots_)(void)s.release();}
     inFlight_=0;slots_.clear();frame_.clear();{std::lock_guard<std::mutex> lock(frameQueueMutex_);frameQueue_.clear();}currentFid_=-1;inPayload_=false;payloadEof_=false;payloadBytes_=0;skipPayload_=false;}
 uint64_t UvcBulkStream::monotonicUs(){timespec ts{};clock_gettime(CLOCK_MONOTONIC,&ts);return (uint64_t)ts.tv_sec*1000000ull+(uint64_t)ts.tv_nsec/1000ull;}
-void UvcBulkStream::reapLoop(){JNIEnv*e=nullptr;bool a=false;if(vm_->GetEnv(reinterpret_cast<void**>(&e),JNI_VERSION_1_6)!=JNI_OK){if(vm_->AttachCurrentThread(&e,nullptr)!=JNI_OK){running_=false;return;}a=true;}while(running_){void*ctx=nullptr;int rc=ioctl(fd_,USBDEVFS_REAPURBNDELAY,&ctx);if(rc<0){if(errno==EAGAIN||errno==EINTR){pollfd p{fd_,POLLIN,0};poll(&p,1,2);continue;}running_=false;break;}inFlight_--;
+void UvcBulkStream::reapLoop(){JNIEnv*e=nullptr;bool a=false;if(vm_->GetEnv(reinterpret_cast<void**>(&e),JNI_VERSION_1_6)!=JNI_OK){if(vm_->AttachCurrentThread(&e,nullptr)!=JNI_OK){running_=false;return;}a=true;}while(running_){void*ctx=nullptr;int rc=ioctl(fd_,USBDEVFS_REAPURBNDELAY,&ctx);if(rc<0){if(errno==EAGAIN||errno==EINTR){pollfd p{fd_,POLLOUT,0};poll(&p,1,2);continue;}running_=false;break;}inFlight_--;
         // REAPURB returns the address of the reaped URB itself; our Slot is its usercontext.
         auto*urb=static_cast<usbfs::Urb*>(ctx);auto*s=urb?static_cast<Slot*>(urb->usercontext):nullptr;if(!s||s->urb!=urb)continue;processUrb(s);if(failedSinceGood_>64&&nowUs()-lastGoodUs_>1500000ull){dead_=true;running_=false;break;}if(running_&&!submit(*s)){running_=false;break;}}if(a)vm_->DetachCurrentThread();}
 void UvcBulkStream::processUrb(Slot*s){

@@ -231,21 +231,16 @@ bool NativeAudioMixer::openMonitor(){
     }
     {
         const int rate=AAudioStream_getSampleRate(monitorStream_);
-        const int hwRate=AAudioStream_getHardwareSampleRate(monitorStream_);
         const int f=monitorActualFormat_;
-        const int hwFmt=AAudioStream_getHardwareFormat(monitorStream_);
         const char* fname=f==AAUDIO_FORMAT_PCM_I16?"16-bit":f==AAUDIO_FORMAT_PCM_I24_PACKED?"24-bit":f==AAUDIO_FORMAT_PCM_I32?"32-bit":"32-bit float";
-        const char* hwName=hwFmt==AAUDIO_FORMAT_PCM_I16?"16-bit":hwFmt==AAUDIO_FORMAT_PCM_I24_PACKED?"24-bit":hwFmt==AAUDIO_FORMAT_PCM_I32?"32-bit":"32-bit float";
         const char* perf=AAudioStream_getPerformanceMode(monitorStream_)==AAUDIO_PERFORMANCE_MODE_LOW_LATENCY?"low-latency":"non-low-latency";
         const bool exclusive=AAudioStream_getSharingMode(monitorStream_)==AAUDIO_SHARING_MODE_EXCLUSIVE;
-        const bool mmap=AAudioStream_isMMapUsed(monitorStream_);
         const int buffer=AAudioStream_getBufferSizeInFrames(monitorStream_);
         const int cb=AAudioStream_getFramesPerDataCallback(monitorStream_);
         monitorInfo_=std::to_string(rate)+" Hz, "+fname+", "+(exclusive?"direct (exclusive)":"shared")+
-            ", "+perf+", MMAP "+(mmap?"yes":"no")+
-            ", buffer "+std::to_string(buffer)+" frames, burst "+std::to_string(burst)+" frames, callback "+std::to_string(cb)+" frames"+
-            "; hardware "+std::to_string(hwRate)+" Hz "+hwName+
-            (rate!=sampleRate_||hwRate!=sampleRate_?"; sample-rate conversion is present":"");
+            ", "+perf+
+            ", buffer "+std::to_string(buffer)+" frames, burst "+std::to_string(burst)+" frames, callback "+std::to_string(cb)+" frames";
+        if(rate!=sampleRate_)monitorInfo_+="; requested program rate "+std::to_string(sampleRate_)+" Hz differs";
         if(!exclusive&&bitPerfect)monitorInfo_+="; WARNING: lossless/direct output was not granted";
     }
     if(AAudioStream_requestStart(monitorStream_)!=AAUDIO_OK){closeMonitor();return false;}

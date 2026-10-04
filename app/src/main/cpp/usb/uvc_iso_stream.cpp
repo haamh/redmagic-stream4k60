@@ -138,7 +138,7 @@ void UvcIsoStream::reapLoop() {
         int rc = ioctl(fd_, USBDEVFS_REAPURBNDELAY, &context);
         if (rc < 0) {
             if (errno == EAGAIN || errno == EINTR) {
-                struct pollfd pfd{fd_, POLLIN, 0};
+                struct pollfd pfd{fd_, POLLOUT, 0};
                 poll(&pfd, 1, 2);
                 continue;
             }

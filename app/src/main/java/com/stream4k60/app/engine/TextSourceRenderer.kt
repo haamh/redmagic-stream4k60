@@ -296,10 +296,15 @@ object TextSourceRenderer {
         }
         val y = ((h - textBitmap.height) / 2f).coerceAtLeast(0f)
         val period = (textBitmap.width + s.rollingGap).coerceAtLeast(1).toFloat()
-        var x = -(offset % period + period) % period
-        while (x < w) {
-            canvas.drawBitmap(textBitmap, x, y, Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG))
-            x += period
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
+        if (kotlin.math.abs(s.rollingSpeed) < 0.001f) {
+            canvas.drawBitmap(textBitmap, ((w - textBitmap.width) / 2f).coerceAtLeast(0f), y, paint)
+        } else {
+            var x = -(offset % period + period) % period
+            while (x < w) {
+                canvas.drawBitmap(textBitmap, x, y, paint)
+                x += period
+            }
         }
         canvas.restore()
         return bitmap

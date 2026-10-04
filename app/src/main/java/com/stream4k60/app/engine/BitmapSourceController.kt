@@ -91,7 +91,7 @@ class BitmapSourceController(private val context: Context, private val scope:Cor
             "TEXT"->renderText(src,fingerprint,cfg,root.has("obsId"))
             "IMAGE_SLIDESHOW"->renderSlideshow(src,fingerprint,cfg)
             "IMAGE"->{
-                val path=cfg.optString("file").ifBlank{cfg.optString("path")}
+                val path=cfg.optString("url").ifBlank{cfg.optString("file").ifBlank{cfg.optString("path")}}
                 if(path.isBlank()){SourceRuntimeErrors.report(src.id,"Choose an image file in source properties.");removeLayerIfCurrent(src.id,fingerprint);return}
                 val bitmap=decodeBitmap(path)
                 if(bitmap==null){SourceRuntimeErrors.report(src.id,"The image file could not be opened. Re-select it or relink the asset.");removeLayerIfCurrent(src.id,fingerprint);return}
@@ -275,20 +275,46 @@ class BitmapSourceController(private val context: Context, private val scope:Cor
         uploadIfCurrent(src.id,fingerprint,src.configJson,frame.first,frame.second.first,frame.second.second)
     }
 
-    private fun decodeBitmap(path:String):Bitmap? = runCatching {
-        val bounds=BitmapFactory.Options().apply{inJustDecodeBounds=true}
-        openBitmapInput(path)?.use{BitmapFactory.decodeStream(it,null,bounds)}
-            ?: return@runCatching null
-        if(bounds.outWidth<=0||bounds.outHeight<=0)return@runCatching null
-        var sample=1
-        while((bounds.outWidth.toLong()/(sample*2L))*(bounds.outHeight.toLong()/(sample*2L))>MAX_DECODE_PIXELS)sample*=2
-        val options=BitmapFactory.Options().apply{inSampleSize=sample;inPreferredConfig=Bitmap.Config.ARGB_8888}
-        openBitmapInput(path)?.use{BitmapFactory.decodeStream(it,null,options)}
-    }.getOrNull()
+    private suspend fun decodeBitmap(path:String):Bitmap? = withContext(Dispatchers.IO) {
+        runCatching {
+            val uri=Uri.parse(path)
+            if (uri.scheme?.lowercase() in setOf("http","https")) {
+                val connection=(URL(path).openConnection() as java.net.HttpURLConnection).apply {
+                    connectTimeout=10_000
+                    readTimeout=15_000
+                    instanceFollowRedirects=true
+                    requestMethod="GET"
+                    setRequestProperty("User-Agent","Stream4K60/1.0")
+                }
+                try {
+                    if (connection.responseCode !in 200..299) return@runCatching null
+                    val bytes=connection.inputStream.use { it.readBytes() }
+                    val bounds=BitmapFactory.Options().apply{inJustDecodeBounds=true}
+                    BitmapFactory.decodeByteArray(bytes,0,bytes.size,null).also { it?.recycle() }
+                    val boundsCheck=BitmapFactory.Options().apply{inJustDecodeBounds=true}
+                    BitmapFactory.decodeByteArray(bytes,0,bytes.size,boundsCheck)
+                    if(boundsCheck.outWidth<=0||boundsCheck.outHeight<=0)return@runCatching null
+                    var sample=1
+                    while((boundsCheck.outWidth.toLong()/(sample*2L))*(boundsCheck.outHeight.toLong()/(sample*2L))>MAX_DECODE_PIXELS)sample*=2
+                    val options=BitmapFactory.Options().apply{inSampleSize=sample;inPreferredConfig=Bitmap.Config.ARGB_8888}
+                    BitmapFactory.decodeByteArray(bytes,0,bytes.size,options)
+                } finally { connection.disconnect() }
+            } else {
+                val bounds=BitmapFactory.Options().apply{inJustDecodeBounds=true}
+                openBitmapInput(path)?.use{BitmapFactory.decodeStream(it,null,bounds)}
+                    ?: return@runCatching null
+                if(bounds.outWidth<=0||bounds.outHeight<=0)return@runCatching null
+                var sample=1
+                while((bounds.outWidth.toLong()/(sample*2L))*(bounds.outHeight.toLong()/(sample*2L))>MAX_DECODE_PIXELS)sample*=2
+                val options=BitmapFactory.Options().apply{inSampleSize=sample;inPreferredConfig=Bitmap.Config.ARGB_8888}
+                openBitmapInput(path)?.use{BitmapFactory.decodeStream(it,null,options)}
+            }
+        }.getOrNull()
+    }
 
     private fun openBitmapInput(path:String):InputStream? {
         val uri=Uri.parse(path)
-        return when(uri.scheme){
+        return when(uri.scheme?.lowercase()){
             "content"->context.contentResolver.openInputStream(uri)
             "file"->uri.path?.let(::File)?.takeIf(File::isFile)?.let(::FileInputStream)
             else->File(path).absoluteFile.takeIf(File::isFile)?.let(::FileInputStream)

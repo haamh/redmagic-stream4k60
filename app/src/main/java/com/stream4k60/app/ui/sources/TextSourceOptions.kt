@@ -76,6 +76,15 @@ internal fun TextSourceOptions(sourceName: String, imported: Boolean, settings: 
         SliderField("Gradient opacity", opacity(style.gradientColor), 0..100, "%") { set("gradientColor", "#FF" + hex(style.gradientColor).removePrefix("#")); set("gradientOpacity", it) }
         SliderField("Gradient direction", style.gradientDirection.toInt(), 0..360, "°") { set("gradientDirection", it) }
     }
+    val backgroundEnabled = (style.background ushr 24) != 0
+    CheckField("Background box", backgroundEnabled, "Adds a box directly behind the rendered text. Its size follows the text automatically unless Rolling text is enabled.") { enabled ->
+        if (enabled) {
+            set("backgroundColor", "#FF" + hex(style.background).removePrefix("#"))
+            set("backgroundOpacity", 100)
+        } else {
+            set("backgroundOpacity", 0)
+        }
+    }
     ColorField("Background color", hex(style.background), showAlpha = false) { set("backgroundColor", "#FF" + it.removePrefix("#").takeLast(6)); set("backgroundOpacity", opacity(style.background).takeIf { o -> o > 0 } ?: 100) } // choosing a colour shows it
     SliderField("Background opacity", opacity(style.background), 0..100, "%") { set("backgroundColor", "#FF" + hex(style.background).removePrefix("#")); set("backgroundOpacity", it) }
     ChoiceDropdown("Background shape", listOf("box" to "One box behind the text", "lines" to "Highlight behind each line"), if (style.backgroundMode == 1) "lines" else "box") { set("backgroundStyle", it) }

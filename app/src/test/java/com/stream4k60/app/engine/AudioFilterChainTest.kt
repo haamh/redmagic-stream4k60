@@ -7,6 +7,22 @@ import org.junit.Test
 
 class AudioFilterChainTest {
     @Test
+    fun gainDefaultsToZeroDbAndClamps() {
+        val stage = AudioFilterStage(type = AudioFilterType.GAIN).with("gainDb", 99.0)
+        assertEquals(30f, AudioFilterChain.gainConfig(stage).gainDb, 0f)
+        assertEquals(0f, AudioFilterChain.gainConfig(AudioFilterStage(type = AudioFilterType.GAIN)).gainDb, 0f)
+    }
+
+    @Test
+    fun gainRoundTripsAndDisabledGainIsIgnored() {
+        val stages = listOf(AudioFilterStage(type = AudioFilterType.GAIN).with("gainDb", 12.0))
+        val config = AudioFilterChain.write(JSONObject().toString(), stages)
+        val read = AudioFilterChain.read(config)
+        assertEquals(12f, AudioFilterChain.gain(config)!!.gainDb, 0f)
+        assertEquals(stages.single().id, read.single().id)
+    }
+
+    @Test
     fun gateCloseFollowsStartListeningLevel() {
         val gate = AudioFilterChain.gateConfig(AudioFilterStage(type = AudioFilterType.NOISE_GATE).with("openDb", -40.0))
         assertEquals(-40f, gate.openDb, 0f)

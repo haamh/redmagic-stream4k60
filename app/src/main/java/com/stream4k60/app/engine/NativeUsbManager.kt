@@ -66,9 +66,19 @@ class NativeUsbManager @Inject constructor(@ApplicationContext private val conte
             if(recent)StreamLog.add("USB device ${d.productName?:d.deviceName} came back within 10 s of dropping off: waiting until it stays connected")
             val identity=keyOf(d)
             scope.launch {
-                delay(if(recent)4000 else 1500)
-                val current=usb.deviceList.values.firstOrNull { keyOf(it)==identity }
-                current?.let { runCatching { requestOrOpen(it) } }
+                // A dock/hub can finish downstream enumeration later than a direct cable.
+                // Keep checking Android's deviceList for a bounded period instead of missing the device once.
+                delay(if(recent)1000 else 500)
+                val deadline=android.os.SystemClock.elapsedRealtime()+15_000
+                while(android.os.SystemClock.elapsedRealtime()<deadline){
+                    val current=usb.deviceList.values.firstOrNull{keyOf(it)==identity}
+                    if(current!=null){
+                        runCatching{requestOrOpen(current)}
+                        return@launch
+                    }
+                    delay(250)
+                }
+                StreamLog.add("USB device "+(d.productName?:d.deviceName)+": attach broadcast arrived, but Android did not expose it in deviceList within 15 s")
             }}
         UsbManager.ACTION_USB_DEVICE_DETACHED->extra(i)?.let{StreamLog.add("USB device ${it.productName?:it.deviceName} unplugged (${it.deviceName})");lastDetach[keyOf(it)]=android.os.SystemClock.elapsedRealtime();remove(it);if(askingPermissionFor==it.deviceId)permissionAnswered()}
         ACTION_USB_PERMISSION->{extra(i)?.let{if(i.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED,false))openAndRegister(it)};permissionAnswered()}

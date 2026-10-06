@@ -302,13 +302,13 @@ class RtmpPublisher(private val onState:(State,String)->Unit={_,_->}){
     }
 
     private fun sendMetadata(){
-        val videoCodeId: Any = if(videoCodec == OutputCodec.HEVC) fourCcNumber("hvc1").toDouble() else "avc1"
+        val videoCodeId: Double = if(videoCodec == OutputCodec.HEVC) fourCcNumber("hvc1").toDouble() else 7.0
         val meta=linkedMapOf<String,Any?>(
             "width" to videoWidth.toDouble(),
             "height" to videoHeight.toDouble(),
             "framerate" to videoFps.toDouble(),
             "videocodecid" to videoCodeId,
-            "audiocodecid" to "mp4a",
+            "audiocodecid" to 10.0,
             "stereo" to true,
             "2.0" to 2.0
         )

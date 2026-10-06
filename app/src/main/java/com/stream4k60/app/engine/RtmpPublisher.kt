@@ -227,7 +227,7 @@ class RtmpPublisher(private val onState:(State,String)->Unit={_,_->}){
                     writeMessage(0x09,6,ts,body)
                     if(!s.codecConfig)sentVideoFrames++
                 }else{
-                    val s=item.sample;val ts=timestamp(s.ptsUs)
+                    val s=item.sample;val ts=timestamp(s.ptsUs,s.codecConfig)
                     val body=if(s.codecConfig)flvAudioSequence(item.a?:return)else flvAudioRaw(s.data)
                     writeMessage(0x08,4,ts,body)
                 }

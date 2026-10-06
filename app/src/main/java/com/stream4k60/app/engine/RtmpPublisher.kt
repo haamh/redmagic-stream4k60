@@ -177,9 +177,15 @@ class RtmpPublisher(private val onState:(State,String)->Unit={_,_->}){
         inStates.clear();inChunkSize=128;bytesReceived.set(0);lastAck=0L;ackWindow=0L
         val uri=URI(if(url.startsWith("rtmps://")||url.startsWith("rtmp://"))url else error("Invalid RTMP(S) URL"))
         val host=uri.host?:error("Invalid RTMP host");val port=if(uri.port>0)uri.port else if(uri.scheme.equals("rtmps",true)||tls)443 else 1935
+        val connectTimeout=timeoutMs.toInt().coerceAtLeast(1000)
         val s=if(uri.scheme.equals("rtmps",true)||tls){
-            (SSLSocketFactory.getDefault() as SSLSocketFactory).createSocket().also{it.connect(InetSocketAddress(host,port),timeoutMs.toInt().coerceAtLeast(1000));(it as SSLSocket).soTimeout=timeoutMs.toInt().coerceAtLeast(1000);it.startHandshake()}
-        }else Socket().also{it.soTimeout=timeoutMs.toInt().coerceAtLeast(1000);it.connect(InetSocketAddress(host,port),timeoutMs.toInt().coerceAtLeast(1000))}
+            // Create the TLS socket with the hostname, not an unconnected socket + InetSocketAddress.
+            // Android then carries the YouTube hostname in SNI during the handshake, which YouTube requires for RTMPS ingest.
+            (SSLSocketFactory.getDefault() as SSLSocketFactory).createSocket(host,port).also{
+                (it as SSLSocket).soTimeout=connectTimeout
+                it.startHandshake()
+            }
+        }else Socket().also{it.soTimeout=connectTimeout;it.connect(InetSocketAddress(host,port),connectTimeout)}
         socket=s;input=BufferedInputStream(s.getInputStream(),64*1024);output=BufferedOutputStream(s.getOutputStream(),64*1024)
         if(stopRequested){runCatching{s.close()};error("Stopped while connecting")}
         handshake()
@@ -209,6 +215,7 @@ class RtmpPublisher(private val onState:(State,String)->Unit={_,_->}){
         sendCommand(8,"publish",5,listOf(key,"live"));waitFor("publish",5.0){it.command=="onStatus"&&it.info["code"]=="NetStream.Publish.Start"}
         sendMetadata();timestampBaseUs=Long.MIN_VALUE;firstMediaTimestampLogged=false
         videoSequenceSent=false;audioSequenceSent=false;waitingForKeyframe=true
+        StreamLog.add("RTMP publish setup ready: codec=$videoCodec, ${videoWidth}x${videoHeight}@${videoFps}, chunkSize=$outChunkSize")
         if(stopRequested)error("Stopped while connecting")
         state=State.PUBLISHING;onState(state,"Publishing")
         writerRunning=true;writerThread=Thread(::writeLoop,"Stream4k-RTMP-Writer").apply{priority=Thread.MAX_PRIORITY;start()}
@@ -227,7 +234,16 @@ class RtmpPublisher(private val onState:(State,String)->Unit={_,_->}){
                     if(s.codecConfig&&item.v?.codec==OutputCodec.HEVC)colorInfo?.let{writeMessage(0x09,6,ts,FlvMetadata.colorInfo(it))}
                     val body=if(s.codecConfig)flvVideoSequence(item.v?:return)else flvVideoFrame(s.data,s.keyframe, videoCodec)
                     writeMessage(0x09,6,ts,body)
-                    if(!s.codecConfig)sentVideoFrames++
+                    if(s.codecConfig){
+                        StreamLog.add("RTMP video sequence header: ${body.size} bytes, $videoCodec")
+                    } else {
+                        sentVideoFrames++
+                        if(sentVideoFrames<=3L){
+                            val nals=AnnexB.nalus(s.data)
+                            val types=nals.joinToString(","){if(videoCodec==OutputCodec.H264)((it.firstOrNull()?.toInt()?:0) and 0x1F).toString() else (((it.getOrNull(0)?.toInt()?:0) ushr 1) and 0x3F).toString()}
+                            StreamLog.add("RTMP video frame #$sentVideoFrames: ${s.data.size} bytes, key=${s.keyframe}, NAL types=$types, tag=${body.getOrNull(0)?.toInt()?.and(255)}")
+                        }
+                    }
                 }else{
                     val s=item.sample;val ts=timestamp(s.ptsUs,s.codecConfig)
                     if(!s.codecConfig&&!firstMediaTimestampLogged){firstMediaTimestampLogged=true;StreamLog.add("RTMP first audio PTS ${s.ptsUs} -> ${ts} ms")}

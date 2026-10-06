@@ -120,10 +120,17 @@ class StreamOutputSession(
 
     fun awaitPublisherReady(timeoutMs:Long):Boolean {
         if (rtmp != null) {
+            // RTMP "Publishing" only means the handshake/publish command succeeded. Do not report LIVE until the
+            // writer has actually transmitted the first video frame; otherwise a dead encoder path can look healthy.
             val end=System.nanoTime()+timeoutMs*1_000_000L
-            while(System.nanoTime()<end){if(rtmp?.isPublishing()==true)return true;Thread.sleep(20)}
+            while(System.nanoTime()<end){
+                if(rtmp?.sentVideoFrames?.let { it > 0L }==true)return true
+                if(rtmp?.isPublishing()!=true)return false
+                Thread.sleep(20)
+            }
             return false
         }
+        // HLS readiness is stronger already: this latch is released only after YouTube has acknowledged a segment.
         return hls?.awaitFirstSegment(timeoutMs) ?: true
     }
     fun enableRecording(recording:RecordingConfig){

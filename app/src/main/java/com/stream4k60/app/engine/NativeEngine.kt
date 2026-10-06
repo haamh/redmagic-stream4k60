@@ -70,6 +70,14 @@ object NativeEngine {
     external fun setSourceSceneRef(sourceId: String, key: String)
     external fun setTransition(type: Int, durationMs: Int)
     external fun setTransitionProgress(progress: Float)
+    /** Freezes the outgoing scene at the next frame; [movePairs] = old id, new id, ... for the Move transition. */
+    external fun beginSceneTransition(type: Int, durationMs: Int, movePairs: Array<String>)
+    /** Animates from the snapshot to the live new scene. */
+    external fun startSceneTransition()
+    /** Rolling text slid by the compositor (8 floats, see GlCompositor::setSourceRoll); null turns it off. */
+    external fun setSourceRoll(sourceId: String, params: FloatArray?)
+    /** 0 none, 1 snapshot pending, 2 snapshot shown, 3 animating. */
+    external fun sceneTransitionPhase(): Int
 
     external fun getRenderTimeMs(): Float
     external fun getDroppedFrames(): Long

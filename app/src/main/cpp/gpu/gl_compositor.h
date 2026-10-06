@@ -14,6 +14,8 @@
 #include <algorithm>
 #include <vector>
 #include <array>
+#include <chrono>
+#include <set>
 
 namespace stream4k60 {
 
@@ -56,6 +58,9 @@ struct SourceLayer {
     /** SDR to HDR boost (inverse tone mapping) for an SDR source in an HDR output: strength 0..1, highlight peak in nits. */
     /** HLG look (a source read as HLG): strength and colour 0..1 (1 = plain HLG), the display peak HLG is decoded for. */
     float hlgMix=1.f,hlgGamut=1.f,hlgPeak=1000.f;
+    // Rolling text slid by the compositor: speed (source px/s), strip width S (source px), window/strip, box w/h and strip
+    // y/height in the texture (fractions), 1/box alpha (0 = no clip to the box).
+    bool rolling=false;float roll[8]={0,0,0,0,0,0,0,0};
     /** Raw frames: whose frame this is (the original for a reference) and which one, for converting each frame to RGB once. */
     std::string decodeKey; uint64_t frameStamp=0;
     int filterTypes[kMaxFilterStages]={};
@@ -109,6 +114,8 @@ public:
     void setSourceBlank(const std::string& id,bool blank){std::lock_guard<std::mutex>lk(m_);if(blank)blanks_[id]=true;else blanks_.erase(id);}
     /** HLG look for a source read as HLG (often an SDR camera, for its look): [strength] blends from its SDR reading, [colour]
      *  from true (Rec. 709) colours to HLG's BT.2020 reading, [peakNits] is the display peak it is decoded for. 1, 1, 1000 = plain HLG. */
+    /** Rolling text: the texture holds the box and a seamless text strip; the compositor slides the strip each frame. */
+    void setSourceRoll(const std::string& id,const float* p,int n){std::lock_guard<std::mutex>lk(m_);if(!p||n<8){rolls_.erase(id);return;}std::array<float,8> a{};std::copy(p,p+8,a.begin());rolls_[id]=a;}
     void setSourceHlgLook(const std::string& id,float strength,float colour,float peakNits){std::lock_guard<std::mutex>lk(m_);
         if(strength>=0.999f&&colour>=0.999f&&std::abs(peakNits-1000.f)<1.f)hlgLook_.erase(id);
         else hlgLook_[id]={std::clamp(strength,0.f,1.f),std::clamp(colour,0.f,1.f),std::clamp(peakNits,100.f,4000.f)};}
@@ -131,6 +138,15 @@ public:
     void setVideoSettings(uint32_t w,uint32_t h,int fps){if(w>0&&h>0){canvasW_.store(w);canvasH_.store(h);}if(fps>0)fps_.store(std::clamp(fps,1,240));}
     void setTransition(int type,int durationMs){transitionType_=type;transitionDurationMs_=std::max(1,durationMs);if(type==0)transitionProgress_=0.0f;}
     void setTransitionProgress(float progress){transitionProgress_=std::clamp(progress,0.0f,1.0f);}
+    // Scene transitions. The outgoing scene is frozen into a snapshot at the next frame, the incoming scene is drawn live,
+    // and the two are mixed on the GPU every frame with eased progress from the render clock (smooth at any frame rate;
+    // no fade through black while the new scene's sources settle). [movePairs] holds (old layer id, new layer id) pairs
+    // for Move: those glide from the old layout to the new one.
+    void beginSceneTransition(int type,int durationMs,const std::vector<std::string>& movePairs);
+    /** Starts the animation once the new scene is on the canvas; until then the snapshot is shown. */
+    void startSceneTransition();
+    /** 0 none, 1 snapshot pending, 2 snapshot shown (waiting for start), 3 animating. */
+    int sceneTransitionPhase()const{return transPhase_.load();}
     float renderMs() const{return renderMs_.load();}
     uint64_t frames()const{return frames_.load();}
     uint64_t dropped()const{return dropped_.load();}
@@ -185,7 +201,7 @@ private:
     int previewTransferWanted()const{return previewHdr_.load()?outputTransfer_.load():0;}
     bool yuvTarget_=false;
     struct Uniforms { GLint ext=-1,raw=-1,canvas=-1,rect=-1,scale=-1,pivot=-1,rot=-1,mat=-1,op=-1,crop=-1,fh=-1,fv=-1,rawSize=-1,extTex=-1,tex2d=-1,rawTex=-1,rawAux=-1,sf=-1,tf=-1,out=-1,sw=-1,hp=-1,ym=-1,yf=-1,
-        stageCount=-1,stageType=-1,stageParams=-1,texel=-1,lutMin=-1,lutMax=-1,lutSize=-1,lut0=-1,lut1=-1,clipFlipY=-1,premul=-1,extMode=-1,srcMatrix=-1,srcFull=-1,refWhite=-1,yuvTex=-1,knee=-1,hlgLook=-1,hlgMix=-1,hlgGamut=-1,hlgPeak=-1,localSize=-1,decodePass=-1,scroll=-1; } u_;
+        stageCount=-1,stageType=-1,stageParams=-1,texel=-1,lutMin=-1,lutMax=-1,lutSize=-1,lut0=-1,lut1=-1,clipFlipY=-1,premul=-1,extMode=-1,srcMatrix=-1,srcFull=-1,refWhite=-1,yuvTex=-1,knee=-1,hlgLook=-1,hlgMix=-1,hlgGamut=-1,hlgPeak=-1,localSize=-1,decodePass=-1,scroll=-1,rollOn=-1,roll0=-1,roll1=-1; } u_;
     // Render-thread stage times (ms, smoothed) for describeRender().
     std::atomic<float> tPrepare_{0},tScenes_{0},tCanvas_{0},tPreview_{0},tEncoder_{0},tSolo_{0},tWait_{0};
     // Where a streaming frame's time really goes: GPU time of the canvas and encoder passes (EXT_disjoint_timer_query,
@@ -202,6 +218,20 @@ private:
     EglContext egl_;
     GLuint vao_=0,vbo_=0,program_=0,overlayProgram_=0,copyProgram_=0;GLint copyTexLoc_=-1;
     int transitionType_=0; int transitionDurationMs_=300; float transitionProgress_=0.0f; float transitionR_=0.0f,transitionG_=0.0f,transitionB_=0.0f;
+    struct Geo{float x,y,w,h,pivotX,pivotY,rotation,scaleX,scaleY,opacity,cropL,cropT,cropR,cropB;};
+    std::atomic<int> transPhase_{0};
+    double frameClockSec_=0.0; // this frame's presentation slot (steady clock): scrolling moves in even steps per frame
+    int transKind_=1,transDurMs_=400;std::chrono::steady_clock::time_point transStart_{};
+    std::map<std::string,std::string> movePairs_; // new layer id -> old layer id
+    std::set<std::string> moveOld_;               // old layer ids left out of the Move snapshot (they glide instead)
+    std::map<std::string,Geo> moveFrom_;          // new layer id -> the geometry it starts from
+    GLuint snapTex_=0,snapFbo_=0,transNewTex_=0,transNewFbo_=0,transProgram_=0;
+    int snapW_=0,snapH_=0,transNewW_=0,transNewH_=0;bool transNewDeep_=false;
+    GLint tpOld_=-1,tpNew_=-1,tpKind_=-1,tpP_=-1,tpE_=-1,tpRes_=-1;
+    bool ensureTransitionTargets(int w,int h,bool deep);
+    void captureTransitionSnapshot(const std::vector<SourceLayer>& layers,int w,int h);
+    void drawTransition(int w,int h,float p,float e);
+    void applyMoveTransition(std::vector<SourceLayer>& layers,float e);
     std::atomic<uint32_t> canvasW_{1920},canvasH_{1080};
     std::atomic<int> fps_{60};
     EGLSurface preview_=EGL_NO_SURFACE,encoder_=EGL_NO_SURFACE;
@@ -238,6 +268,7 @@ private:
     bool decodePass_=false;
     void decodeRawSources(std::vector<SourceLayer>& layers);
     std::map<std::string,std::array<float,3>> hlgLook_;
+    std::map<std::string,std::array<float,8>> rolls_;
     std::atomic<int> outputTransfer_{0};std::atomic<bool> outputTenBit_{false};std::atomic<float> sdrWhite_{300.f},hdrPeak_{1000.f};
     std::string encoderSurfaceInfo_;
     std::atomic<bool> previewHdr_{false};

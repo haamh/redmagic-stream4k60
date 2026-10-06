@@ -31,6 +31,25 @@ fun GeneralSettingsPage(viewModel: SettingsViewModel) {
                 modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
             )
             com.stream4k60.app.ui.settings.components.SettingsButton("Back up now", { viewModel.backupNow() })
+            // A complete backup in a file of your choice (survives uninstalling, moves to another tablet), and back.
+            val backupMessage by viewModel.backupMessage.collectAsState()
+            var confirmImport by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf<android.net.Uri?>(null) }
+            val exportLauncher = androidx.activity.compose.rememberLauncherForActivityResult(androidx.activity.result.contract.ActivityResultContracts.CreateDocument("application/zip")) { uri -> uri?.let(viewModel::exportBackup) }
+            val importLauncher = androidx.activity.compose.rememberLauncherForActivityResult(androidx.activity.result.contract.ActivityResultContracts.OpenDocument()) { uri -> confirmImport = uri }
+            com.stream4k60.app.ui.settings.components.SettingsButton("Export full backup…", {
+                exportLauncher.launch("stream4k60-backup-" + java.text.SimpleDateFormat("yyyyMMdd-HHmm", java.util.Locale.US).format(java.util.Date()) + ".zip")
+            })
+            com.stream4k60.app.ui.settings.components.SettingsButton("Import backup file…", { importLauncher.launch(arrayOf("application/zip", "application/octet-stream", "application/x-zip-compressed")) })
+            backupMessage?.let { androidx.compose.material3.Text(it, style = androidx.compose.material3.MaterialTheme.typography.bodySmall, modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)) }
+            confirmImport?.let { uri ->
+                androidx.compose.material3.AlertDialog(
+                    onDismissRequest = { confirmImport = null },
+                    title = { androidx.compose.material3.Text("Restore from this file?") },
+                    text = { androidx.compose.material3.Text("All settings, scene collections, scenes, sources (with their positions, crops and filters), profiles and hotkeys are replaced with the ones in the file. The current state is backed up first, so you can go back to it. The app restarts.") },
+                    confirmButton = { androidx.compose.material3.TextButton(onClick = { confirmImport = null; viewModel.importBackup(uri) }) { androidx.compose.material3.Text("Restore") } },
+                    dismissButton = { androidx.compose.material3.TextButton(onClick = { confirmImport = null }) { androidx.compose.material3.Text("Cancel") } }
+                )
+            }
             if (backups.isEmpty()) androidx.compose.material3.Text("No backups yet.", modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp))
             backups.forEach { b ->
                 androidx.compose.foundation.layout.Row(

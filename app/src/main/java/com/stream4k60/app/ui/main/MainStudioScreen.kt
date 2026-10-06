@@ -41,7 +41,7 @@ fun MainStudioScreen(
     onOpenProfiles:()->Unit,
     vm:MainStudioViewModel=hiltViewModel()
 ){
-    val streaming by vm.streamState.collectAsState();val streamButton by vm.streamButtonState.collectAsState();val liveState by vm.liveState.collectAsState();val streamStats by vm.streamStats.collectAsState();val streamError by vm.streamError.collectAsState();val recording by vm.recordState.collectAsState();val studio by vm.isStudioModeEnabled.collectAsState();val selectedTransition by vm.selectedTransition.collectAsState();val scenes by vm.scenes.collectAsState();val sceneCollections by vm.sceneCollections.collectAsState();val activeCollectionId by vm.activeSceneCollectionId.collectAsState();val active by vm.activeScene.collectAsState();val sources by vm.sources.collectAsState();val sourceErrors by SourceRuntimeErrors.errors.collectAsState();val videoConfig by vm.videoConfig.collectAsState();val importedRtmpEndpoint by vm.importedRtmpEndpoint.collectAsState();var selectedSourceId by remember{mutableStateOf<String?>(null)};val canvasFocusRequester=remember{FocusRequester()};var search by remember{mutableStateOf(false)};var yt by remember{mutableStateOf(false)};var customRtmp by remember{mutableStateOf(false)};var addSource by remember{mutableStateOf(false)};var editingSource by remember{mutableStateOf<SourceItem?>(null)};var filteringSource by remember{mutableStateOf<SourceItem?>(null)};var audioManage by remember{mutableStateOf<Pair<String,String>?>(null)};var broadcastTitle by rememberSaveable{mutableStateOf<String?>(null)}
+    val streaming by vm.streamState.collectAsState();val streamButton by vm.streamButtonState.collectAsState();val liveState by vm.liveState.collectAsState();val streamStats by vm.streamStats.collectAsState();val streamError by vm.streamError.collectAsState();val recording by vm.recordState.collectAsState();val studio by vm.isStudioModeEnabled.collectAsState();val selectedTransition by vm.selectedTransition.collectAsState();val transitionDuration by vm.transitionDuration.collectAsState();val scenes by vm.scenes.collectAsState();val sceneCollections by vm.sceneCollections.collectAsState();val activeCollectionId by vm.activeSceneCollectionId.collectAsState();val active by vm.activeScene.collectAsState();val sources by vm.sources.collectAsState();val sourceErrors by SourceRuntimeErrors.errors.collectAsState();val videoConfig by vm.videoConfig.collectAsState();val importedRtmpEndpoint by vm.importedRtmpEndpoint.collectAsState();var selectedSourceId by remember{mutableStateOf<String?>(null)};val canvasFocusRequester=remember{FocusRequester()};var search by remember{mutableStateOf(false)};var yt by remember{mutableStateOf(false)};var customRtmp by remember{mutableStateOf(false)};var addSource by remember{mutableStateOf(false)};var editingSource by remember{mutableStateOf<SourceItem?>(null)};var filteringSource by remember{mutableStateOf<SourceItem?>(null)};var audioManage by remember{mutableStateOf<Pair<String,String>?>(null)};var broadcastTitle by rememberSaveable{mutableStateOf<String?>(null)}
     val general by vm.generalSettings.collectAsState()
     var confirmStop by remember { mutableStateOf<String?>(null) }
     var showStats by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf(false) }
@@ -348,6 +348,8 @@ fun MainStudioScreen(
                             onRenameSource = vm::renameSource,
                             onDuplicateSource = vm::duplicateSource,
                             onDuplicateReference = vm::duplicateSourceAsReference,
+                            copyTargets = scenes.filter { it.id != active?.id },
+                            onCopyToScene = vm::copySourceToScene,
                             onDeleteSource = vm::removeSource,
                             onResetTransform = vm::resetSourceTransform,
                             onPasteTransform = vm::updateSourceTransform,
@@ -422,7 +424,7 @@ fun MainStudioScreen(
                             dock.transitionsWidth = 0f; dock.save()
                         }
                         Dock("Scene Transitions", Modifier.width(transitionsWidth).fillMaxHeight(), transitionsScale) {
-                            TransitionsDockContent(selectedTransition, vm::selectTransition, studio) { active?.id?.let { vm.setActiveScene(it) } }
+                            TransitionsDockContent(selectedTransition, vm::selectTransition, studio, { active?.id?.let { vm.setActiveScene(it) } }, transitionDuration, vm::setTransitionDuration)
                         }
                         DockSplitter(true, { d -> dock.controlsWidth = (controlsWidth.value - d).coerceIn(140f, areaWidth * 0.35f) }, dock::save) {
                             dock.controlsWidth = 0f; dock.save()

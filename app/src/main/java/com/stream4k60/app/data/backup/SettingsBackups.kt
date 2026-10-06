@@ -23,6 +23,8 @@ object SettingsBackups {
     private const val DB_NAME = "stream4k60.db"
     // Account sign-in state is not a setting; restoring it could sign a different account back in.
     private val skippedPrefs = setOf("youtube_account.xml")
+    /** App-private folders that sources point into (picked images are copied there; imported OBS profiles). */
+    private val assetDirs = listOf("source_assets", "obs_profiles")
 
     data class Backup(val file: File, val createdMs: Long, val sizeBytes: Long)
 
@@ -63,6 +65,44 @@ object SettingsBackups {
     }
 
     /**
+     * A complete backup written to [out] (a file the user picked, so it survives an uninstall or moves to another tablet):
+     * the database (every scene collection, scene, source with its settings, position, crop and filters, profiles,
+     * hotkeys), the preferences (layout, transition) and the files sources use. It includes the stream keys.
+     */
+    @Synchronized
+    fun exportTo(context: Context, db: AppDatabase, out: java.io.OutputStream): Int {
+        val snapshot = File(context.cacheDir, "export-db.tmp").apply { delete() }
+        db.openHelper.writableDatabase.execSQL("VACUUM INTO ?", arrayOf<Any>(snapshot.absolutePath))
+        var files = 0
+        ZipOutputStream(out.buffered()).use { zip ->
+            zip.putNextEntry(ZipEntry(DB_NAME)); snapshot.inputStream().use { it.copyTo(zip) }; zip.closeEntry()
+            prefsFiles(context).forEach { p -> zip.putNextEntry(ZipEntry("shared_prefs/" + p.name)); p.inputStream().use { it.copyTo(zip) }; zip.closeEntry() }
+            for (name in assetDirs) {
+                val root = File(context.filesDir, name)
+                root.walkTopDown().filter { it.isFile }.forEach { f ->
+                    zip.putNextEntry(ZipEntry("files/" + f.relativeTo(context.filesDir).invariantSeparatorsPath))
+                    f.inputStream().use { it.copyTo(zip) }; zip.closeEntry(); files++
+                }
+            }
+            zip.putNextEntry(ZipEntry("info.txt"))
+            val created = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(Date())
+            zip.write("Stream4k60 full backup\ncreated: $created\nsource files: $files\n".toByteArray())
+            zip.closeEntry()
+        }
+        snapshot.delete()
+        return files
+    }
+
+    /** Copies a backup file the user picked into the app and restores it (the app restarts). */
+    fun importFrom(context: Context, db: AppDatabase, input: java.io.InputStream) {
+        val copy = File(dir(context), "imported-" + SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(Date()) + ".zip")
+        copy.outputStream().use { input.copyTo(it) }
+        val hasDb = ZipInputStream(copy.inputStream().buffered()).use { zip -> generateSequence { zip.nextEntry }.any { it.name == DB_NAME } }
+        if (!hasDb) { copy.delete(); error("That file isn't a Stream4k60 backup (no database inside).") }
+        restore(context, db, copy)
+    }
+
+    /**
      * Replaces the database and preferences with [backup] and restarts the app. The current state is backed up first,
      * so a restore can be undone by restoring that one.
      */
@@ -79,6 +119,10 @@ object SettingsBackups {
                     entry.name == DB_NAME -> dbFile
                     entry.name.startsWith("shared_prefs/") && !entry.name.contains("..") && entry.name.endsWith(".xml") ->
                         File(prefsDir, entry.name.removePrefix("shared_prefs/"))
+                    // Full backups also carry the files sources use, back at the same paths the sources point to.
+                    entry.name.startsWith("files/") && !entry.name.contains("..") && !entry.isDirectory &&
+                        assetDirs.any { entry.name.startsWith("files/$it/") } ->
+                        File(context.filesDir, entry.name.removePrefix("files/")).also { it.parentFile?.mkdirs() }
                     else -> null
                 }
                 if (target != null) target.outputStream().use { zip.copyTo(it) }

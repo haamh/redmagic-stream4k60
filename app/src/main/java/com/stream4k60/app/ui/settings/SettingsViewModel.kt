@@ -44,6 +44,22 @@ class SettingsViewModel @Inject constructor(
         runCatching { com.stream4k60.app.data.backup.SettingsBackups.backup(appContext, database, "saved from Settings", force = true) }
         refreshBackups()
     }
+    /** Result of the last export / import, shown under the buttons. */
+    private val _backupMessage = MutableStateFlow<String?>(null)
+    val backupMessage: StateFlow<String?> = _backupMessage.asStateFlow()
+    fun exportBackup(uri: android.net.Uri) = viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+        _backupMessage.value = runCatching {
+            val files = appContext.contentResolver.openOutputStream(uri, "w")?.use { com.stream4k60.app.data.backup.SettingsBackups.exportTo(appContext, database, it) }
+                ?: error("the chosen file could not be opened")
+            "Full backup saved (database, preferences and $files source files). It contains your stream keys, so keep it private."
+        }.getOrElse { "Backup failed: ${it.message}" }
+    }
+    fun importBackup(uri: android.net.Uri) = viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+        runCatching {
+            appContext.contentResolver.openInputStream(uri)?.use { com.stream4k60.app.data.backup.SettingsBackups.importFrom(appContext, database, it) }
+                ?: error("the chosen file could not be opened")
+        }.onFailure { _backupMessage.value = "Restore failed: ${it.message}" }
+    }
     fun restoreBackup(backup: com.stream4k60.app.data.backup.SettingsBackups.Backup) = viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
         com.stream4k60.app.data.backup.SettingsBackups.restore(appContext, database, backup.file)
     }

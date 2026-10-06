@@ -74,6 +74,9 @@ fun SourcePanel(
     onRenameSource: (String, String) -> Unit = { _, _ -> },
     onDuplicateSource: (String) -> Unit = {},
     onDuplicateReference: (String) -> Unit = {},
+    /** Other scenes a source can be copied into as a synced copy. */
+    copyTargets: List<com.stream4k60.app.ui.main.SceneItem> = emptyList(),
+    onCopyToScene: (String, String) -> Unit = { _, _ -> },
     onDeleteSource: (String) -> Unit = {},
     onResetTransform: (String) -> Unit = {},
     onPasteTransform: (String, String) -> Unit = { _, _ -> },
@@ -243,6 +246,13 @@ fun SourcePanel(
                                 text = { Text("Duplicate (reference, synced)") },
                                 onClick = { contextMenuSourceId = null; onDuplicateReference(source.id) }
                             )
+                            // The same source in another scene, in sync (OBS: copy, then Paste (Reference) there).
+                            copyTargets.forEach { scene ->
+                                androidx.compose.material3.DropdownMenuItem(
+                                    text = { Text("Copy to “${scene.name}” (synced)") },
+                                    onClick = { contextMenuSourceId = null; onCopyToScene(source.id, scene.id) }
+                                )
+                            }
                             // OBS's Paste (Duplicate): an independent new source with its own playback.
                             androidx.compose.material3.DropdownMenuItem(
                                 text = { Text("Duplicate (independent copy)") },

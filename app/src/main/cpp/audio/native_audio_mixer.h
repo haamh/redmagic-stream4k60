@@ -144,6 +144,8 @@ private:
     std::vector<float> monitorScratch_;
     std::atomic<float> monitorPeak_{0.f};   // loudest output sample since monitorInfo() last read it
     std::atomic<uint64_t> monitorUnderruns_{0};
+    std::atomic<int> monitorBurst_{0};               // the output device's burst, for the queue target
+    std::atomic<uint64_t> monitorTrims_{0}, monitorTrimmedFrames_{0};
     mutable std::mutex monitorInfoMutex_;
     std::string monitorInfo_;
     mutable std::mutex inputsMutex_;

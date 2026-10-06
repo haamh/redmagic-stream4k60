@@ -1,5 +1,6 @@
 package com.stream4k60.app.ui.main.components
 
+import kotlin.math.roundToInt
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -116,9 +117,9 @@ private fun ToolbarChip(label: String, icon: androidx.compose.ui.graphics.vector
 
 /** Scene Transitions dock body: transition type and duration. */
 @Composable
-fun TransitionsDockContent(selected: String, onSelect: (String) -> Unit, isStudioMode: Boolean, onTransition: () -> Unit) {
+fun TransitionsDockContent(selected: String, onSelect: (String) -> Unit, isStudioMode: Boolean, onTransition: () -> Unit, durationMs: Int = 400, onDuration: (Int) -> Unit = {}) {
     var open by remember { mutableStateOf(false) }
-    val options = listOf("Cut", "Fast Fade", "Fade", "Slow Fade")
+    val options = com.stream4k60.app.ui.main.SceneTransitions.names
     Column(Modifier.fillMaxSize().padding(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
         Box {
             Row(
@@ -131,8 +132,14 @@ fun TransitionsDockContent(selected: String, onSelect: (String) -> Unit, isStudi
         }
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text("Duration", fontSize = 13.sp, modifier = Modifier.width(64.dp))
-            Text(when (selected) { "Cut" -> "—"; "Fast Fade" -> "180 ms"; "Slow Fade" -> "600 ms"; else -> "300 ms" }, fontSize = 13.sp)
+            Text(if (selected == "Cut") "—" else "$durationMs ms", fontSize = 13.sp)
         }
+        // How fast the transition plays (OBS's Duration), saved for next time.
+        if (selected != "Cut") androidx.compose.material3.Slider(
+            value = durationMs.toFloat(),
+            onValueChange = { onDuration((it / 50f).roundToInt() * 50) },
+            valueRange = com.stream4k60.app.ui.main.SceneTransitions.MIN_MS.toFloat()..com.stream4k60.app.ui.main.SceneTransitions.MAX_MS.toFloat()
+        )
         if (isStudioMode) ObsButton("Transition", onTransition, active = true)
     }
 }

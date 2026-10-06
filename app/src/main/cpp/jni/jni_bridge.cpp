@@ -89,6 +89,10 @@ extern "C" JNIEXPORT void JNICALL Java_com_stream4k60_app_engine_NativeEngine_se
 extern "C" JNIEXPORT jstring JNICALL Java_com_stream4k60_app_engine_NativeEngine_getLastError(JNIEnv*e,jclass){return e->NewStringUTF(stream4k60::GlCompositor::lastError().c_str());}
 extern "C" JNIEXPORT void JNICALL Java_com_stream4k60_app_engine_NativeEngine_removeSourceLayer(JNIEnv*e,jclass,jstring id){g.releaseSource(jstr(e,id),e);}
 extern "C" JNIEXPORT void JNICALL Java_com_stream4k60_app_engine_NativeEngine_setTransition(JNIEnv*,jclass,jint type,jint duration){g.setTransition(type,duration);}
+extern "C" JNIEXPORT void JNICALL Java_com_stream4k60_app_engine_NativeEngine_beginSceneTransition(JNIEnv*e,jclass,jint type,jint duration,jobjectArray pairs){std::vector<std::string> v;if(pairs){const jsize n=e->GetArrayLength(pairs);for(jsize i=0;i<n;++i){auto s=static_cast<jstring>(e->GetObjectArrayElement(pairs,i));v.push_back(s?jstr(e,s):std::string());if(s)e->DeleteLocalRef(s);}}g.beginSceneTransition(type,duration,v);}
+extern "C" JNIEXPORT void JNICALL Java_com_stream4k60_app_engine_NativeEngine_setSourceRoll(JNIEnv*e,jclass,jstring id,jfloatArray params){const std::string sid=jstr(e,id);if(!params){g.setSourceRoll(sid,nullptr,0);return;}const jsize n=e->GetArrayLength(params);jfloat* v=e->GetFloatArrayElements(params,nullptr);g.setSourceRoll(sid,v,static_cast<int>(n));e->ReleaseFloatArrayElements(params,v,JNI_ABORT);}
+extern "C" JNIEXPORT void JNICALL Java_com_stream4k60_app_engine_NativeEngine_startSceneTransition(JNIEnv*,jclass){g.startSceneTransition();}
+extern "C" JNIEXPORT jint JNICALL Java_com_stream4k60_app_engine_NativeEngine_sceneTransitionPhase(JNIEnv*,jclass){return g.sceneTransitionPhase();}
 extern "C" JNIEXPORT void JNICALL Java_com_stream4k60_app_engine_NativeEngine_setTransitionProgress(JNIEnv*,jclass,jfloat p){g.setTransitionProgress(p);}
 extern "C" JNIEXPORT jfloat JNICALL Java_com_stream4k60_app_engine_NativeEngine_getRenderTimeMs(JNIEnv*,jclass){return g.renderMs();}
 extern "C" JNIEXPORT jlong JNICALL Java_com_stream4k60_app_engine_NativeEngine_getDroppedFrames(JNIEnv*,jclass){return (jlong)g.dropped();}

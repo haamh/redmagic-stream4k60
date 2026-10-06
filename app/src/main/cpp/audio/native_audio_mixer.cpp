@@ -225,6 +225,7 @@ bool NativeAudioMixer::openMonitor(){
     // large default buffer cannot silently turn a ~10 ms pipeline into hundreds of milliseconds.
     const int burst=AAudioStream_getFramesPerBurst(monitorStream_);
     const int capacity=AAudioStream_getBufferCapacityInFrames(monitorStream_);
+    monitorBurst_=burst>0?burst:192;
     if(burst>0&&capacity>0){
         const int target=std::min(capacity,burst*2);
         if(target>0)AAudioStream_setBufferSizeInFrames(monitorStream_,target);
@@ -255,7 +256,12 @@ std::string NativeAudioMixer::monitorInfo()const{
     std::string s;{std::lock_guard<std::mutex>l(monitorInfoMutex_);s=monitorInfo_;}
     // The level actually sent out (0 dBFS = full scale), so a quiet monitor can be told apart from a quiet source.
     const float peak=const_cast<std::atomic<float>&>(monitorPeak_).exchange(0.f);
-    char b[96];snprintf(b,sizeof b,"; output peak %.1f dBFS, %llu underruns",peak>1e-6f?20.f*std::log10(peak):-120.f,static_cast<unsigned long long>(monitorUnderruns_.load()));
+    // How much audio waits between the mixer and the output: this queue is the part of the monitor delay the app adds.
+    const double queuedMs=monitorRing_?static_cast<double>(monitorRing_->availableFrames())*1000.0/sampleRate_:0.0;
+    const double keptMs=static_cast<double>(blockFrames_+std::max(1,monitorBurst_.load()))*1000.0/sampleRate_;
+    char b[256];snprintf(b,sizeof b,"; output peak %.1f dBFS, %llu underruns; queued %.1f ms (kept near %.1f ms), %llu trims (%.0f ms dropped)",
+        peak>1e-6f?20.f*std::log10(peak):-120.f,static_cast<unsigned long long>(monitorUnderruns_.load()),queuedMs,keptMs,
+        static_cast<unsigned long long>(monitorTrims_.load()),static_cast<double>(monitorTrimmedFrames_.load())*1000.0/sampleRate_);
     return s.empty()?s:s+b;}
 void NativeAudioMixer::closeMonitor(){if(!monitorStream_)return;AAudioStream_requestStop(monitorStream_);AAudioStream_close(monitorStream_);monitorStream_=nullptr;}
 void NativeAudioMixer::stop(){running_=false;if(mixThread_.joinable())mixThread_.join();{std::lock_guard<std::mutex>l(inputsMutex_);for(auto&i:inputs_)closeInput(*i);}closeMonitor();}
@@ -372,6 +378,22 @@ aaudio_data_callback_result_t NativeAudioMixer::monitorCallback(AAudioStream*,vo
     const bool silent=self->monitorMuted_.load()||!self->monitorRing_;
     const float gain=self->monitorVolume_.load();
     size_t done=0;const size_t total=static_cast<size_t>(numFrames);
+    if(!silent){
+        // Keep the queue near one mix block plus one device burst. The mixer pushes 10 ms blocks on the system clock and
+        // this callback drains them on the output device's clock. Nothing used to trim it, so every mix-thread stall (it
+        // catches up in a burst afterwards) and the drift between the two clocks stayed as delay, up to the queue's 1 s.
+        const size_t block=static_cast<size_t>(self->blockFrames_);
+        const size_t burst=std::max<size_t>(static_cast<size_t>(std::max(1,self->monitorBurst_.load())),total);
+        const size_t low=block+burst,high=low+block;
+        const size_t avail=self->monitorRing_->availableFrames();
+        if(avail>high){
+            // After a stall all of the excess goes at once; slow clock drift goes 1 ms at a time.
+            const size_t excess=avail-low;
+            const size_t drop=avail>high+block?excess:std::min<size_t>(excess,static_cast<size_t>(self->sampleRate_/1000));
+            self->monitorRing_->discard(drop);
+            self->monitorTrims_++;self->monitorTrimmedFrames_+=drop;
+        }
+    }
     while(done<total){
         const size_t chunk=std::min(total-done,self->monitorScratch_.size()/2);
         float*f=format==AAUDIO_FORMAT_PCM_FLOAT?static_cast<float*>(audioData)+done*2:self->monitorScratch_.data();

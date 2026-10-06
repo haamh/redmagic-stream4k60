@@ -107,6 +107,7 @@ class BitmapSourceController(private val context: Context, private val scope:Cor
     private suspend fun renderText(src:com.stream4k60.app.ui.main.SourceItem,fingerprint:String,cfg:JSONObject,imported:Boolean){
         val style=TextSourceRenderer.style(cfg,src.name,imported)
         if(!style.rolling){
+            NativeEngine.setSourceRoll(src.id,null)
             var last:String?=null
             while(kotlinx.coroutines.currentCoroutineContext().isActive&&sourceFingerprints[src.id]==fingerprint){
                 val text=if(style.readFromFile){
@@ -118,8 +119,10 @@ class BitmapSourceController(private val context: Context, private val scope:Cor
                     val base=runCatching{TextSourceRenderer.render(context,style,text)}.getOrElse{SourceRuntimeErrors.report(src.id,"The text could not be drawn: ${it.message}");return}
                     val logicalW=base.width
                     val logicalH=base.height
-                    val k=minOf(textScale(src.transformJson,logicalW to logicalH),TextSourceRenderer.MAX_SIZE.toFloat()/logicalW,TextSourceRenderer.MAX_SIZE.toFloat()/logicalH).coerceAtLeast(1f)
-                    val bitmap=if(k>1.01f)runCatching{TextSourceRenderer.render(context,TextSourceRenderer.scaled(style,k),text)}.getOrNull()?.also{base.recycle()}?:base else base
+                    // Drawn at the size it is shown on the canvas (smaller too), so glyphs land 1:1 on the canvas's pixels: crisp
+                    // edges and full-white strokes, instead of a texture shrunk or stretched by the compositor.
+                    val k=minOf(textScale(src.transformJson,logicalW to logicalH),TextSourceRenderer.MAX_SIZE.toFloat()/logicalW,TextSourceRenderer.MAX_SIZE.toFloat()/logicalH).coerceAtLeast(0.1f)
+                    val bitmap=if(kotlin.math.abs(k-1f)>0.01f)runCatching{TextSourceRenderer.render(context,TextSourceRenderer.scaled(style,k),text)}.getOrNull()?.also{base.recycle()}?:base else base
                     SourceNativeSizes.report(src.id,logicalW,logicalH)
                     val drawnSuffix=if(bitmap!==base) " (drawn " + bitmap.width + "x" + bitmap.height + ")" else ""
                     StreamLog.add("Text source " + src.name + ": " + logicalW + "x" + logicalH + drawnSuffix)
@@ -132,57 +135,57 @@ class BitmapSourceController(private val context: Context, private val scope:Cor
             return
         }
 
-        var textBitmap:android.graphics.Bitmap?=null
+        // Rolling text is slid by the compositor: drawn once (at the size it is shown, so 1:1 on the canvas) as the box
+        // plus a seamless strip of the text, then moved every frame on the render clock. It used to be redrawn on the CPU
+        // and uploaded every ~16 ms: uneven against the 60 fps canvas (jitter), slowed by any pause, and stretched (soft).
         var currentText:String?=null
-        var nextFilePoll=0L
-        var offset=0f
-        var previous=android.os.SystemClock.uptimeMillis()
         try{
             while(kotlinx.coroutines.currentCoroutineContext().isActive&&sourceFingerprints[src.id]==fingerprint){
-                val now=android.os.SystemClock.uptimeMillis()
-                if(currentText==null||style.readFromFile&&now>=nextFilePoll){
-                    val nextText=if(style.readFromFile){
-                        nextFilePoll=now+1000L
-                        if(style.file.isBlank()){
-                            SourceRuntimeErrors.report(src.id,"Read from file is on: choose a text file in source properties.")
-                            ""
-                        }else withContext(Dispatchers.IO){
-                            TextSourceRenderer.readTextFile(context,style.file)
-                        }?:run{
-                            SourceRuntimeErrors.report(src.id,"The text file could not be read. Choose it again.")
-                            ""
-                        }
-                    }else style.text
-                    if(nextText!=currentText){
-                        currentText=nextText
-                        textBitmap?.recycle()
-                        textBitmap=runCatching{
-                            TextSourceRenderer.render(context,style.copy(background=0,backgroundMode=0,extents=false),nextText.ifEmpty{" "})
-                        }.getOrElse{
-                            SourceRuntimeErrors.report(src.id,"The rolling text could not be drawn: ${it.message}")
-                            return
-                        }
-                        val w=TextSourceRenderer.rollingWidth(style,textBitmap!!.width)
-                        val h=TextSourceRenderer.rollingHeight(style,textBitmap!!.height)
-                        SourceNativeSizes.report(src.id,w,h)
-                        StreamLog.add("Rolling text ${src.name}: window ${w}x${h}, text ${textBitmap!!.width}x${textBitmap!!.height}")
-                        offset=0f
-                        previous=now
+                val nextText=if(style.readFromFile){
+                    if(style.file.isBlank()){SourceRuntimeErrors.report(src.id,"Read from file is on: choose a text file in source properties.");""}
+                    else withContext(Dispatchers.IO){TextSourceRenderer.readTextFile(context,style.file)}?:run{SourceRuntimeErrors.report(src.id,"The text file could not be read. Choose it again.");""}
+                }else style.text
+                if(nextText!=currentText){
+                    currentText=nextText
+                    val plain=style.copy(background=0,backgroundMode=0,extents=false)
+                    val base=runCatching{TextSourceRenderer.render(context,plain,nextText.ifEmpty{" "})}.getOrElse{SourceRuntimeErrors.report(src.id,"The rolling text could not be drawn: ${it.message}");return}
+                    val textW=base.width;val textH=base.height
+                    val w=TextSourceRenderer.rollingWidth(style,textW);val h=TextSourceRenderer.rollingHeight(style,textH)
+                    SourceNativeSizes.report(src.id,w,h)
+                    val gap=style.rollingGap.coerceAtLeast(0)
+                    val period=(textW+gap).coerceAtLeast(1)
+                    val copies=(kotlin.math.ceil(w.toDouble()/period).toInt()+1).coerceAtLeast(2)
+                    val strip=period*copies
+                    val k=minOf(textScale(src.transformJson,w to h),TextSourceRenderer.MAX_SIZE.toFloat()/strip,TextSourceRenderer.MAX_SIZE.toFloat()/(h*2+2)).coerceAtLeast(0.1f)
+                    val sStyle=TextSourceRenderer.scaled(style,k)
+                    val text=if(kotlin.math.abs(k-1f)>0.01f)runCatching{TextSourceRenderer.render(context,TextSourceRenderer.scaled(plain,k),nextText.ifEmpty{" "})}.getOrNull()?.also{base.recycle()}?:base else base
+                    val wk=kotlin.math.round(w*k).toInt().coerceAtLeast(1);val hk=kotlin.math.round(h*k).toInt().coerceAtLeast(1)
+                    if(kotlin.math.abs(style.rollingSpeed)<0.001f){
+                        // Not moving: one frame, the text centred in its box.
+                        val still=TextSourceRenderer.renderRollingFrame(sStyle,text,0f,wk,hk)
+                        if(text!==still)text.recycle()
+                        NativeEngine.setSourceRoll(src.id,null)
+                        val frame=still.toRgba();still.recycle()
+                        uploadIfCurrent(src.id,fingerprint,src.configJson,frame.first,frame.second.first,frame.second.second)
+                        if(!style.readFromFile)break
+                        kotlinx.coroutines.delay(1000);continue
                     }
+                    val atlas=TextSourceRenderer.renderRollingAtlas(sStyle,text,wk,hk,period*k,copies)
+                    if(text!==atlas)text.recycle()
+                    val aw=atlas.width.toFloat();val ah=atlas.height.toFloat()
+                    val boxAlpha=(style.background ushr 24)/255f
+                    val clip=if(boxAlpha>0f&&style.backgroundRadius>0f)1f/boxAlpha else 0f
+                    val stripPx=kotlin.math.ceil(period*k*copies)
+                    val params=floatArrayOf(style.rollingSpeed,strip.toFloat(),(wk/stripPx).toFloat().coerceAtMost(1f),wk/aw,hk/ah,(hk+2)/ah,hk/ah,clip)
+                    StreamLog.add("Rolling text ${src.name}: window ${w}x${h}, strip ${strip}x${h} (${copies} copies), drawn ${atlas.width}x${atlas.height}, slid by the compositor at ${style.rollingSpeed} px/s")
+                    val frame=atlas.toRgba();atlas.recycle()
+                    NativeEngine.setSourceRoll(src.id,params)
+                    uploadIfCurrent(src.id,fingerprint,src.configJson,frame.first,frame.second.first,frame.second.second)
                 }
-                val bitmap=textBitmap?:continue
-                val dt=((now-previous).coerceAtMost(100L)).coerceAtLeast(0L)/1000f
-                previous=now
-                offset+=style.rollingSpeed*dt
-                val w=TextSourceRenderer.rollingWidth(style,bitmap.width)
-                val h=TextSourceRenderer.rollingHeight(style,bitmap.height)
-                val frame=TextSourceRenderer.renderRollingFrame(style,bitmap,offset,w,h)
-                val rgba=frame.toRgba()
-                frame.recycle()
-                uploadIfCurrent(src.id,fingerprint,src.configJson,rgba.first,rgba.second.first,rgba.second.second)
-                kotlinx.coroutines.delay(16)
+                if(!style.readFromFile)break
+                kotlinx.coroutines.delay(1000)
             }
-        }finally{textBitmap?.recycle()}
+        }finally{if(sourceFingerprints[src.id]!=fingerprint)NativeEngine.setSourceRoll(src.id,null)}
     }
 
     /** How many times larger than its own size a text source is shown on the canvas (from its transform), in quarter steps, 1-4. */
@@ -191,7 +194,9 @@ class BitmapSourceController(private val context: Context, private val scope:Cor
         var scale=maxOf(kotlin.math.abs(t.optDouble("scaleX",1.0)),kotlin.math.abs(t.optDouble("scaleY",1.0)))
         val bw=t.optDouble("boundsWidth",0.0);val bh=t.optDouble("boundsHeight",0.0)
         if(t.optInt("boundsType",0)>0&&bw>0&&bh>0&&native!=null&&native.first>0&&native.second>0)scale=maxOf(bw/native.first,bh/native.second)
-        return ((kotlin.math.round(scale*4)/4).coerceIn(1.0,4.0)).toFloat()
+        // Steps of 1/12 octave (about 6 %): close to the shown size without redrawing on every small change.
+        val stepped=Math.pow(2.0,kotlin.math.round(kotlin.math.ln(scale.coerceIn(0.1,4.0))/kotlin.math.ln(2.0)*12.0)/12.0)
+        return stepped.coerceIn(0.1,4.0).toFloat()
     }
 
     private fun uploadIfCurrent(id:String,fingerprint:String,configJson:String,rgba:ByteArray,width:Int,height:Int){

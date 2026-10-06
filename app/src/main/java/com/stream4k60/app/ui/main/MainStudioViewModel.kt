@@ -86,7 +86,7 @@ enum class StudioRecordState{IDLE,RECORDING,PAUSED,STOPPING,ERROR}
  private val _currentSceneCollection=MutableStateFlow("Default");val currentSceneCollection=_currentSceneCollection.asStateFlow()
  private val _sceneCollections=MutableStateFlow<List<SceneCollectionEntity>>(emptyList());val sceneCollections=_sceneCollections.asStateFlow()
  private val _activeSceneCollectionId=MutableStateFlow<String?>(null);val activeSceneCollectionId=_activeSceneCollectionId.asStateFlow()
- private val _activeScene=MutableStateFlow<SceneItem?>(null);val activeScene=_activeScene.asStateFlow();private val _scenes=MutableStateFlow<List<SceneItem>>(emptyList());val scenes=_scenes.asStateFlow();private val _sources=MutableStateFlow<List<SourceItem>>(emptyList());val sources=_sources.asStateFlow();private val _isStudio=MutableStateFlow(false);val isStudioModeEnabled=_isStudio.asStateFlow();private val _transition=MutableStateFlow("Cut");val selectedTransition=_transition.asStateFlow();private val _streamConfig=MutableStateFlow(StreamConfig());val streamConfig=_streamConfig.asStateFlow();private val _recordConfig=MutableStateFlow(RecordingConfig());val recordConfig=_recordConfig.asStateFlow();private val _streamError=MutableStateFlow<String?>(null);val streamError=_streamError.asStateFlow()
+ private val _activeScene=MutableStateFlow<SceneItem?>(null);val activeScene=_activeScene.asStateFlow();private val _scenes=MutableStateFlow<List<SceneItem>>(emptyList());val scenes=_scenes.asStateFlow();private val _sources=MutableStateFlow<List<SourceItem>>(emptyList());val sources=_sources.asStateFlow();private val _isStudio=MutableStateFlow(false);val isStudioModeEnabled=_isStudio.asStateFlow();private val _transition=MutableStateFlow(collectionPrefs.getString("transitionName","Fade")?:"Fade");val selectedTransition=_transition.asStateFlow();private val _transitionDuration=MutableStateFlow(collectionPrefs.getInt("transitionDurationMs",400).coerceIn(SceneTransitions.MIN_MS,SceneTransitions.MAX_MS));val transitionDuration=_transitionDuration.asStateFlow();private var transitionJob:kotlinx.coroutines.Job?=null;private val _streamConfig=MutableStateFlow(StreamConfig());val streamConfig=_streamConfig.asStateFlow();private val _recordConfig=MutableStateFlow(RecordingConfig());val recordConfig=_recordConfig.asStateFlow();private val _streamError=MutableStateFlow<String?>(null);val streamError=_streamError.asStateFlow()
  val streamState=engine.streamState.map{when(it){StreamState.IDLE->StudioStreamState.IDLE;StreamState.CONNECTING->StudioStreamState.CONNECTING;StreamState.LIVE->StudioStreamState.LIVE;StreamState.RECONNECTING->StudioStreamState.RECONNECTING;StreamState.STOPPING->StudioStreamState.STOPPING;StreamState.ERROR->StudioStreamState.ERROR}}.stateIn(viewModelScope,SharingStarted.Eagerly,StudioStreamState.IDLE)
  val recordState=engine.recordState.map{when(it){RecordState.IDLE->StudioRecordState.IDLE;RecordState.RECORDING->StudioRecordState.RECORDING;RecordState.PAUSED->StudioRecordState.PAUSED;RecordState.STOPPING->StudioRecordState.STOPPING;RecordState.ERROR->StudioRecordState.ERROR}}.stateIn(viewModelScope,SharingStarted.Eagerly,StudioRecordState.IDLE)
  val videoConfig=settingsRepository.videoConfig.stateIn(viewModelScope,SharingStarted.Eagerly,VideoConfig())
@@ -105,7 +105,7 @@ enum class StudioRecordState{IDLE,RECORDING,PAUSED,STOPPING,ERROR}
    fun sceneJson()=org.json.JSONObject().put("name",_activeScene.value?.name.orEmpty()).put("width",videoConfig.value.baseResWidth).put("height",videoConfig.value.baseResHeight)
    currentScene={sceneJson()}
    scenes={org.json.JSONArray(_scenes.value.map{it.name})}
-   transitions={org.json.JSONArray(listOf("Cut","Fade","Fast Fade","Slow Fade"))}
+   transitions={org.json.JSONArray(SceneTransitions.names)}
    currentTransition={_transition.value}
    setCurrentScene={name->_scenes.value.firstOrNull{it.name==name}?.let{setActiveScene(it.id)}}
    setCurrentTransition={name->selectTransition(name)}
@@ -185,12 +185,30 @@ enum class StudioRecordState{IDLE,RECORDING,PAUSED,STOPPING,ERROR}
    for(row in repo.loadSources(sceneId)){
     if(row.id in shownIds||row.id in scenesOf)continue
     val item=toItem(row)
-    val device=item.type.equals("USB_CAPTURE",true)&&item.isVisible&&com.stream4k60.app.engine.SourceReferences.targetOf(item.configJson)==null&&usbDeviceKey(item.configJson) !in shownDevices
-    if(row.id in wanted||device){out+=item.copy(isVisible=true);scenesOf[row.id]=sceneId}
+    if(row.id in wanted){out+=item.copy(isVisible=true);scenesOf[row.id]=sceneId;continue}
+    if(!keepsRunningHidden(item,shownDevices))continue
+    // Browsers and media run hidden as they would in OBS, so "refresh / restart when the scene becomes active" still fire.
+    out+=item.copy(isVisible=item.type.uppercase() !in setOf("BROWSER","MEDIA"));scenesOf[row.id]=sceneId
    }
   }
   backingScenes=scenesOf
   _backingSources.value=out
+ }
+ /**
+  * Like OBS, switching scenes doesn't stop sources: the other scenes' visible sources keep running hidden, so switching
+  * back shows them at once (no camera restart, no page reload). Except what OBS also closes: media set to close when
+  * inactive, browsers set to shut down when hidden, and screen capture / nested scenes / audio-only sources.
+  */
+ private fun keepsRunningHidden(item:SourceItem,shownDevices:Set<String>):Boolean{
+  if(!item.isVisible||com.stream4k60.app.engine.SourceReferences.targetOf(item.configJson)!=null)return false
+  val s=runCatching{org.json.JSONObject(item.configJson).let{it.optJSONObject("settings")?:it}}.getOrDefault(org.json.JSONObject())
+  return when(item.type.uppercase()){
+   "USB_CAPTURE"->usbDeviceKey(item.configJson) !in shownDevices
+   "MEDIA"->!s.optBoolean("closeWhenInactive",s.optBoolean("close_when_inactive",false))
+   "BROWSER"->!s.optBoolean("shutdownWhenHidden",s.optBoolean("shutdown",false))
+   "TEXT","IMAGE","IMAGE_SLIDESHOW","COLOR","CAMERA"->true
+   else->false
+  }
  }
  /** The capture device a USB source reads (its saved identity), so one camera isn't opened by two sources. */
  private fun usbDeviceKey(config:String):String=com.stream4k60.app.engine.UsbDeviceBinding.keyOf(config).ifBlank{
@@ -335,18 +353,28 @@ enum class StudioRecordState{IDLE,RECORDING,PAUSED,STOPPING,ERROR}
   fun removeScene(){viewModelScope.launch{cp("Remove scene");val a=_activeScene.value?:return@launch;val c=repo.collections().first().firstOrNull{it.id==_activeSceneCollectionId.value}?:return@launch;val all=repo.loadScenes(c.id);if(all.size>1){val next=all.first{it.id!=a.id};repo.loadScenes(c.id).forEach{row->if(row.id==next.id)repo.saveScene(row.copy(active=true)) else if(row.active)repo.saveScene(row.copy(active=false))};repo.saveCollection(c.copy(activeSceneId=next.id));load(c.copy(activeSceneId=next.id))}}}
  fun setActiveScene(id:String){viewModelScope.launch{
    val c=repo.collections().first().firstOrNull{it.id==_activeSceneCollectionId.value}?:return@launch
-  val type=transitionCode(_transition.value)
-  if(type==0){NativeEngine.setTransition(0,1);NativeEngine.setTransitionProgress(0f);activateScene(c.id,id);return@launch}
-  val duration=transitionDurationMs();NativeEngine.setTransition(type,duration)
-  val half=(duration/2).coerceAtLeast(1);val steps=16
-  for(i in 0..steps){NativeEngine.setTransitionProgress(i.toFloat()/steps);kotlinx.coroutines.delay((half/steps).toLong().coerceAtLeast(1))}
+  val type=SceneTransitions.code(_transition.value)
+  if(type==0){activateScene(c.id,id);return@launch}
+  // Move: sources in both scenes (the same source or a synced copy of it) glide from the old layout to the new one.
+  val pairs=if(type==SceneTransitions.MOVE)movePairs(_sources.value,repo.loadSources(id).map(::toItem)) else emptyList()
+  // The compositor freezes the outgoing scene at its next frame; the new scene is switched in underneath the snapshot,
+  // and the animation starts once its sources are on the canvas, timed per frame on the render thread.
+  NativeEngine.beginSceneTransition(type,_transitionDuration.value,pairs.toTypedArray())
+  var waited=0
+  while(NativeEngine.sceneTransitionPhase()==1&&waited<250){kotlinx.coroutines.delay(4);waited+=4}
   activateScene(c.id,id)
-  for(i in steps downTo 0){NativeEngine.setTransitionProgress(i.toFloat()/steps);kotlinx.coroutines.delay((half/steps).toLong().coerceAtLeast(1))}
-  NativeEngine.setTransitionProgress(0f)
-}}
+  kotlinx.coroutines.delay(80)
+  NativeEngine.startSceneTransition()
+}.also{job->transitionJob?.cancel();transitionJob=job}}
+/** (old id, new id) pairs of sources both scenes show: the same source, or synced copies of one source, in order. */
+private fun movePairs(old:List<SourceItem>,new:List<SourceItem>):List<String>{
+  fun identity(s:SourceItem)=com.stream4k60.app.engine.SourceReferences.targetOf(s.configJson)?:s.id
+  val pool=old.filter{it.isVisible}.groupBy(::identity).mapValues{it.value.toMutableList()}
+  val out=mutableListOf<String>()
+  for(n in new.filter{it.isVisible}){val o=pool[identity(n)]?.removeFirstOrNull()?:continue;out+=o.id;out+=n.id}
+  return out
+}
 private suspend fun activateScene(collectionId:String,id:String){repo.loadScenes(collectionId).forEach{repo.saveScene(it.copy(active=it.id==id))};repo.saveCollection(repo.collections().first().firstOrNull{it.id==collectionId}?.copy(activeSceneId=id)?:return);load()}
-private fun transitionDurationMs():Int=when(_transition.value){"Fast Fade"->180;"Slow Fade"->600;else->300}
-private fun transitionCode(name:String):Int=when(name){"Cut"->0;else->1}
  /** Adds a source; [onCreated] receives it so the studio can open its properties, like OBS. */
  fun addSource(type:String,onCreated:(SourceItem)->Unit={}){viewModelScope.launch{cp("Add source");val s=_activeScene.value?:return@launch;val rows=repo.loadSources(s.id);val id=UUID.randomUUID().toString()
   // A new group's canvas matches the program canvas, so items moved into it keep their positions.
@@ -378,6 +406,18 @@ private fun transitionCode(name:String):Int=when(name){"Cut"->0;else->1}
   (root.optJSONObject("settings")?:root).put("referenceOf",target)
   val baseName=original.name.removeSuffix(" (reference)")
   repo.saveSources(listOf(original.copy(id=UUID.randomUUID().toString(),name="$baseName (reference)".take(80),sortOrder=insertion,visible=true,locked=false,configJson=root.toString())))
+  load()
+ }}
+ /** Adds [id] to another scene as a synced copy (a reference): same source, same frames, its own position there. */
+ fun copySourceToScene(id:String,sceneId:String){viewModelScope.launch{cp("Copy source to scene")
+  val original=rowFor(id)?:return@launch
+  if(original.type.equals("GROUP",true)||original.sceneId==sceneId)return@launch
+  val target=com.stream4k60.app.engine.SourceReferences.targetOf(original.configJson)?:original.id
+  val top=(repo.loadSources(sceneId).maxOfOrNull{it.sortOrder}?:-1)+1
+  val root=runCatching{org.json.JSONObject(original.configJson)}.getOrDefault(org.json.JSONObject())
+  (root.optJSONObject("settings")?:root).put("referenceOf",target)
+  val baseName=original.name.removeSuffix(" (reference)")
+  repo.saveSources(listOf(original.copy(id=UUID.randomUUID().toString(),sceneId=sceneId,name="$baseName (reference)".take(80),sortOrder=top,visible=true,locked=false,configJson=root.toString())))
   load()
  }}
  fun resetSourceTransform(id:String){updateSourceTransform(id,"{}")}
@@ -699,7 +739,13 @@ private fun transitionCode(name:String):Int=when(name){"Cut"->0;else->1}
  }
  fun stopRecording()=viewModelScope.launch{engine.stopRecording()}
  override fun onCleared(){NativeAudioGraph.stop();super.onCleared()}
- fun pauseRecording()=viewModelScope.launch{engine.pauseRecording()};fun toggleStudioMode(){_isStudio.value=!_isStudio.value};fun selectTransition(v:String){_transition.value=v};fun saveReplay()=viewModelScope.launch{runCatching{engine.saveReplayBuffer()}};fun startReplay()=viewModelScope.launch{runCatching{engine.startReplayBuffer(30,256)}}
+ fun pauseRecording()=viewModelScope.launch{engine.pauseRecording()};fun toggleStudioMode(){_isStudio.value=!_isStudio.value};fun selectTransition(v:String){
+  // OBS-era names become Fade at their old speed.
+  when(v){"Fast Fade"->setTransitionDuration(180);"Slow Fade"->setTransitionDuration(600)}
+  val name=if(v=="Fast Fade"||v=="Slow Fade")"Fade" else v
+  _transition.value=name;collectionPrefs.edit().putString("transitionName",name).apply()
+ }
+ fun setTransitionDuration(ms:Int){val v=ms.coerceIn(SceneTransitions.MIN_MS,SceneTransitions.MAX_MS);_transitionDuration.value=v;collectionPrefs.edit().putInt("transitionDurationMs",v).apply()};fun saveReplay()=viewModelScope.launch{runCatching{engine.saveReplayBuffer()}};fun startReplay()=viewModelScope.launch{runCatching{engine.startReplayBuffer(30,256)}}
 }
 
 /** Ids of the OBS-style global audio sources (not stored as scene rows). */

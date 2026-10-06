@@ -277,6 +277,27 @@ object TextSourceRenderer {
         if (s.rollingHeight > 0) s.rollingHeight.coerceIn(32, MAX_SIZE)
         else (measuredTextHeight + 12).coerceIn(32, MAX_SIZE)
 
+    /**
+     * Rolling text for the compositor to slide: one texture with the box ([windowW] x [windowH], top) and [copies] periods of
+     * the text (bottom, below a 2 px gap), each period the text centred in [period] so the strip repeats without a seam.
+     */
+    fun renderRollingAtlas(s: Style, textBitmap: Bitmap, windowW: Int, windowH: Int, period: Float, copies: Int): Bitmap {
+        val w = windowW.coerceIn(1, MAX_SIZE); val h = windowH.coerceIn(1, MAX_SIZE / 2 - 2)
+        val stripW = kotlin.math.ceil(period * copies).toInt().coerceIn(1, MAX_SIZE)
+        val bitmap = Bitmap.createBitmap(maxOf(stripW, w), h * 2 + 2, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(bitmap)
+        canvas.save(); canvas.clipRect(0f, 0f, w.toFloat(), h.toFloat())
+        drawBackground(canvas, s.copy(backgroundMode = 0), w, h, emptyList())
+        canvas.restore()
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
+        val y = h + 2 + ((h - textBitmap.height) / 2f).coerceAtLeast(0f)
+        val lead = ((period - textBitmap.width) / 2f).coerceAtLeast(0f)
+        canvas.save(); canvas.clipRect(0f, (h + 2).toFloat(), bitmap.width.toFloat(), bitmap.height.toFloat())
+        for (i in 0 until copies) canvas.drawBitmap(textBitmap, i * period + lead, y, paint)
+        canvas.restore()
+        return bitmap
+    }
+
     /** Draw one rolling-text frame: text and its rounded box are the same source item and the text is clipped to the box. */
     fun renderRollingFrame(s: Style, textBitmap: Bitmap, offset: Float, width: Int, height: Int): Bitmap {
         val w = width.coerceIn(64, MAX_SIZE)

@@ -30,6 +30,50 @@ if(max(length(dx*size),length(dy*size))<1.25){frag=vec4(texture(uTex,vUv).rgb,1.
 vec2 a=0.25*(dx+dy),b=0.25*(dx-dy);
 frag=vec4(0.25*(texture(uTex,vUv+a).rgb+texture(uTex,vUv-a).rgb+texture(uTex,vUv+b).rgb+texture(uTex,vUv-b).rgb),1.0);})GLSL";
 
+// Scene transition compositor: uOld is the frozen outgoing scene, uNew the live incoming one (both canvas-sized, rows
+// top-down like the canvas). uP is linear progress, uE eased progress.
+static const char* TRANSITION_VS=R"GLSL(#version 320 es
+layout(location=0)in vec2 aPos;void main(){gl_Position=vec4(aPos,0.0,1.0);})GLSL";
+static const char* TRANSITION_FS=R"GLSL(#version 320 es
+precision highp float;
+uniform sampler2D uOld;uniform sampler2D uNew;uniform int uKind;uniform float uP;uniform float uE;uniform vec2 uRes;
+out vec4 frag;
+const float PI=3.14159265;
+bool outside(vec2 uv){return any(lessThan(uv,vec2(0.0)))||any(greaterThan(uv,vec2(1.0)));}
+vec4 sOld(vec2 uv){return outside(uv)?vec4(0.0):vec4(texture(uOld,uv).rgb,1.0);}
+vec4 sNew(vec2 uv){return outside(uv)?vec4(0.0):vec4(texture(uNew,uv).rgb,1.0);}
+vec2 zoomed(vec2 uv,float s){return (uv-0.5)/s+0.5;}
+// Radial (zoom) blur: samples along the line to the centre, the streak edit apps put on zoom transitions.
+vec4 zoomOld(vec2 uv,float s,float amt){vec4 c=vec4(0.0);for(int i=0;i<8;i++){float k=1.0-amt*float(i)/7.0;c+=sOld(zoomed(uv,s/k));}return c/8.0;}
+vec4 zoomNew(vec2 uv,float s,float amt){vec4 c=vec4(0.0);for(int i=0;i<8;i++){float k=1.0-amt*float(i)/7.0;c+=sNew(zoomed(uv,s/k));}return c/8.0;}
+vec4 slide(vec2 uv,vec2 d,float e){vec4 a=sOld(uv-d*e);vec4 b=sNew(uv+d*(1.0-e));return mix(a,b,b.a);}
+vec2 dirOf(int k){return k==5?vec2(-1.0,0.0):k==6?vec2(1.0,0.0):k==7?vec2(0.0,-1.0):k==8?vec2(0.0,1.0):k==9?vec2(-1.0,0.0):vec2(1.0,0.0);}
+void main(){
+    vec2 uv=gl_FragCoord.xy/uRes;
+    float p=uP,e=uE;
+    vec4 c;
+    if(uKind==1){c=mix(sOld(uv),sNew(uv),e);}
+    else if(uKind==2){c=p<0.5?sOld(uv)*(1.0-smoothstep(0.0,0.5,p)):sNew(uv)*smoothstep(0.5,1.0,p);}
+    else if(uKind==3){ // zoom in: both frames grow toward the viewer, streaked at the peak
+        float b=sin(PI*p)*0.14;vec4 a=zoomOld(uv,1.0+1.3*e,b);vec4 n=zoomNew(uv,mix(0.55,1.0,e),b*0.6);
+        c=mix(a,n,n.a*smoothstep(0.3,0.7,p));}
+    else if(uKind==4){ // zoom out: both frames pull back
+        float b=sin(PI*p)*0.14;vec4 a=zoomOld(uv,mix(1.0,0.5,e),b*0.6);vec4 n=zoomNew(uv,mix(1.9,1.0,e),b);
+        c=mix(n,a,a.a*(1.0-smoothstep(0.3,0.7,p)));}
+    else if(uKind>=5&&uKind<=8){c=slide(uv,dirOf(uKind),e);}
+    else if(uKind==9||uKind==10){ // whip pan: a fast push with motion blur along the move
+        vec2 d=dirOf(uKind);float spread=sin(PI*p)*0.22;c=vec4(0.0);
+        for(int i=0;i<12;i++){c+=slide(uv+d*spread*(float(i)/11.0-0.5),d,e);}c/=12.0;}
+    else if(uKind==11){ // soft diagonal wipe
+        float t=uv.x*0.8+uv.y*0.2;float edge=e*1.25-0.125;c=mix(sOld(uv),sNew(uv),1.0-smoothstep(edge-0.06,edge+0.06,t));}
+    else if(uKind==12){ // circle reveal from the centre
+        float aspect=uRes.x/uRes.y;vec2 q=(uv-0.5)*vec2(aspect,1.0);float R=e*0.52*length(vec2(aspect,1.0))+0.001;
+        c=mix(sOld(uv),sNew(uv),1.0-smoothstep(R-0.015,R+0.015,length(q)));}
+    else if(uKind==20){ // move: the snapshot holds only the sources that leave (premultiplied); the rest glide live
+        vec4 s=texture(uOld,uv);vec4 n=sNew(uv);float k=1.0-e;c=vec4(n.rgb*(1.0-s.a*k)+s.rgb*k,1.0);}
+    else{c=sNew(uv);}
+    frag=vec4(c.rgb,1.0);
+})GLSL";
 static const char* VS=R"GLSL(#version 320 es
 layout(location=0)in vec2 aPos;layout(location=1)in vec2 aUv;
 uniform vec2 uCanvas;uniform vec4 uRect;uniform vec2 uScale;uniform vec2 uPivot;uniform float uRotation;uniform mat4 uTexMatrix;
@@ -127,6 +171,16 @@ uniform int uHlgLook;uniform float uHlgMix;uniform float uHlgGamut;uniform float
 uniform vec2 uLocalSize;uniform int uDecodePass;
 // Scroll filter: offset (fraction of the whole source) the source has rolled by, wrapping around.
 uniform vec2 uScroll;
+uniform int uRollOn;uniform vec4 uRoll0;uniform vec4 uRoll1;
+// Rolling text: the box (top of the texture) stays put, the text strip (bottom, seamless) slides by uRoll0.y and is
+// clipped to the box's shape. uv is the window (0..1).
+vec4 rollColorAt(vec2 uv){
+    vec4 box=texture(u2DTex,vec2(uv.x*uRoll0.z,uv.y*uRoll0.w));
+    vec4 txt=texture(u2DTex,vec2(fract(uv.x*uRoll0.x+uRoll0.y),uRoll1.x+uv.y*uRoll1.y));
+    float a=txt.a*(uRoll1.z>0.0?clamp(box.a*uRoll1.z,0.0,1.0):1.0);
+    float outA=a+box.a*(1.0-a);
+    return outA>0.0?vec4((txt.rgb*a+box.rgb*box.a*(1.0-a))/outA,outA):vec4(0.0);
+}
 const mat3 kBt709To2020=mat3(0.6274,0.0691,0.0164,0.3293,0.9195,0.0880,0.0433,0.0114,0.8956);
 const mat3 kBt2020To709=mat3(1.6605,-0.1246,-0.0182,-0.5876,1.1329,-0.1006,-0.0728,-0.0083,1.1187);
 const vec3 kLuma2020=vec3(0.2627,0.6780,0.0593);
@@ -227,7 +281,7 @@ if(uDecodePass==1){frag=vec4(rawColorAt(gl_FragCoord.xy/uLocalSize).rgb,1.0);ret
 vec2 uv=mix(uCrop.xy,uCrop.zw,vUv);if(uFlipH)uv.x=1.-uv.x;if(uFlipV)uv.y=1.-uv.y;
 // As OBS: the filter rolls the whole source (wrapping around), and the scene item's crop then shows a window of it.
 // Only the axis that moves wraps: wrapping both made a horizontal ticker's top / bottom edge pick up the opposite edge.
-if(uScroll.x!=0.0)uv.x=fract(uv.x+uScroll.x);if(uScroll.y!=0.0)uv.y=fract(uv.y+uScroll.y);vec4 c=sampleScaled(uv);if(uPremultiplied&&c.a>0.0)c.rgb/=c.a;c=applyFilters(c,uv);if(uTransfer!=uOutput||(uTransfer==2&&uHlgLook==1))c.rgb=convertSignal(c.rgb);frag=vec4(c.rgb,c.a*uOpacity);})GLSL";
+vec4 c;if(uRollOn==1)c=rollColorAt(uv);else{if(uScroll.x!=0.0)uv.x=fract(uv.x+uScroll.x);if(uScroll.y!=0.0)uv.y=fract(uv.y+uScroll.y);c=sampleScaled(uv);}if(uPremultiplied&&c.a>0.0)c.rgb/=c.a;c=applyFilters(c,uv);if(uTransfer!=uOutput||(uTransfer==2&&uHlgLook==1))c.rgb=convertSignal(c.rgb);frag=vec4(c.rgb,c.a*uOpacity);})GLSL";
 static std::string gLastError;
 static GLuint compileShader(GLenum t,const char*s){GLuint x=glCreateShader(t);glShaderSource(x,1,&s,nullptr);glCompileShader(x);GLint ok=0;glGetShaderiv(x,GL_COMPILE_STATUS,&ok);
 if(!ok){char log[2048]={0};glGetShaderInfoLog(x,sizeof(log)-1,nullptr,log);gLastError=std::string(t==GL_VERTEX_SHADER?"Vertex":"Fragment")+" shader failed to compile: "+log;glDeleteShader(x);return 0;}return x;}
@@ -251,7 +305,7 @@ bool GlCompositor::setupGl(){program_=createProgram();if(!program_)return false;
     u_.op=L("uOpacity");u_.crop=L("uCrop");u_.fh=L("uFlipH");u_.fv=L("uFlipV");u_.rawSize=L("uRawSize");u_.extTex=L("uExtTex");u_.tex2d=L("u2DTex");u_.rawTex=L("uRawTex");u_.rawAux=L("uRawAuxTex");
     u_.sf=L("uScaleFilter");u_.tf=L("uTransfer");u_.out=L("uOutput");u_.sw=L("uSdrWhite");u_.hp=L("uHdrPeak");u_.ym=L("uYuvMatrix");u_.yf=L("uYuvFull");
     u_.stageCount=L("uStageCount");u_.stageType=L("uStageType");u_.stageParams=L("uStageParams");u_.texel=L("uTexel");u_.lutMin=L("uLutMin");u_.lutMax=L("uLutMax");u_.lutSize=L("uLutSize");
-    u_.lut0=L("uLut0");u_.lut1=L("uLut1");u_.clipFlipY=L("uClipFlipY");u_.premul=L("uPremultiplied");u_.extMode=L("uExtMode");u_.srcMatrix=L("uSrcMatrix");u_.srcFull=L("uSrcFull");u_.refWhite=L("uRefWhite");u_.yuvTex=L("uYuvTex");u_.knee=L("uKnee");u_.localSize=L("uLocalSize");u_.decodePass=L("uDecodePass");u_.scroll=L("uScroll");u_.hlgLook=L("uHlgLook");u_.hlgMix=L("uHlgMix");u_.hlgGamut=L("uHlgGamut");u_.hlgPeak=L("uHlgPeak");
+    u_.lut0=L("uLut0");u_.lut1=L("uLut1");u_.clipFlipY=L("uClipFlipY");u_.premul=L("uPremultiplied");u_.extMode=L("uExtMode");u_.srcMatrix=L("uSrcMatrix");u_.srcFull=L("uSrcFull");u_.refWhite=L("uRefWhite");u_.yuvTex=L("uYuvTex");u_.knee=L("uKnee");u_.localSize=L("uLocalSize");u_.decodePass=L("uDecodePass");u_.scroll=L("uScroll");u_.rollOn=L("uRollOn");u_.roll0=L("uRoll0");u_.roll1=L("uRoll1");u_.hlgLook=L("uHlgLook");u_.hlgMix=L("uHlgMix");u_.hlgGamut=L("uHlgGamut");u_.hlgPeak=L("uHlgPeak");
     // The raw-YUV sampler exists only where the driver has GL_EXT_YUV_target (the Astra's Adreno does).
     yuvTarget_=u_.yuvTex>=0;if(yuvTarget_)glUniform1i(u_.yuvTex,6);
     createSync_=reinterpret_cast<PFNEGLCREATESYNCKHRPROC>(eglGetProcAddress("eglCreateSyncKHR"));
@@ -449,6 +503,93 @@ void GlCompositor::setSourceSceneRef(const std::string&id,const std::string&key)
     for(int i=0;i<16;++i)s.layer.texMatrix[i]=(i%5==0)?1.f:0.f;
     s.layer.texMatrix[5]=-1.f;s.layer.texMatrix[13]=1.f;
 }
+static float easeTransition(int kind,float p){
+    if(p<=0.f)return 0.f;if(p>=1.f)return 1.f;
+    if(kind==9||kind==10)return p<0.5f?0.5f*std::pow(2.f,20.f*p-10.f):1.f-0.5f*std::pow(2.f,-20.f*p+10.f); // whip: expo
+    if(kind==3||kind==4)return p<0.5f?8.f*p*p*p*p:1.f-std::pow(-2.f*p+2.f,4.f)/2.f;                          // zoom: quart
+    return p<0.5f?4.f*p*p*p:1.f-std::pow(-2.f*p+2.f,3.f)/2.f;                                                 // cubic
+}
+void GlCompositor::beginSceneTransition(int type,int durationMs,const std::vector<std::string>& pairs){
+    std::lock_guard<std::mutex>lk(m_);
+    transKind_=type;transDurMs_=std::clamp(durationMs,50,10000);
+    movePairs_.clear();moveOld_.clear();moveFrom_.clear();
+    for(size_t i=0;i+1<pairs.size();i+=2){movePairs_[pairs[i+1]]=pairs[i];moveOld_.insert(pairs[i]);}
+    transPhase_=running_.load()?1:0;
+}
+void GlCompositor::startSceneTransition(){
+    std::lock_guard<std::mutex>lk(m_);
+    if(transPhase_.load()==2){transStart_=std::chrono::steady_clock::now();transPhase_=3;}
+    else transPhase_=0; // no snapshot was taken (renderer idle): nothing to animate
+}
+bool GlCompositor::ensureTransitionTargets(int w,int h,bool deep){
+    if(!transProgram_){
+        GLuint v=compileShader(GL_VERTEX_SHADER,TRANSITION_VS),f=compileShader(GL_FRAGMENT_SHADER,TRANSITION_FS);
+        if(!v||!f){if(v)glDeleteShader(v);if(f)glDeleteShader(f);return false;}
+        GLuint p=glCreateProgram();glAttachShader(p,v);glAttachShader(p,f);glBindAttribLocation(p,0,"aPos");glLinkProgram(p);
+        GLint ok=0;glGetProgramiv(p,GL_LINK_STATUS,&ok);glDeleteShader(v);glDeleteShader(f);
+        if(!ok){glDeleteProgram(p);return false;}
+        transProgram_=p;tpOld_=glGetUniformLocation(p,"uOld");tpNew_=glGetUniformLocation(p,"uNew");tpKind_=glGetUniformLocation(p,"uKind");
+        tpP_=glGetUniformLocation(p,"uP");tpE_=glGetUniformLocation(p,"uE");tpRes_=glGetUniformLocation(p,"uRes");
+    }
+    auto make=[&](GLuint& tex,GLuint& fbo,GLenum fmt){
+        if(tex)glDeleteTextures(1,&tex);
+        glGenTextures(1,&tex);glBindTexture(GL_TEXTURE_2D,tex);glTexStorage2D(GL_TEXTURE_2D,1,fmt,w,h);
+        glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_LINEAR);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_S,GL_CLAMP_TO_EDGE);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_T,GL_CLAMP_TO_EDGE);
+        if(!fbo)glGenFramebuffers(1,&fbo);
+        glBindFramebuffer(GL_FRAMEBUFFER,fbo);glFramebufferTexture2D(GL_FRAMEBUFFER,GL_COLOR_ATTACHMENT0,GL_TEXTURE_2D,tex,0);
+    };
+    // The snapshot has real alpha (Move keeps only the leaving sources in it); half float keeps 10-bit output exact.
+    if(!snapFbo_||snapW_!=w||snapH_!=h){make(snapTex_,snapFbo_,GL_RGBA16F);snapW_=w;snapH_=h;}
+    if(!transNewFbo_||transNewW_!=w||transNewH_!=h||transNewDeep_!=deep){make(transNewTex_,transNewFbo_,deep?GL_RGB10_A2:GL_RGBA8);transNewW_=w;transNewH_=h;transNewDeep_=deep;}
+    return true;
+}
+void GlCompositor::captureTransitionSnapshot(const std::vector<SourceLayer>& layers,int w,int h){
+    bool move;std::set<std::string> old;std::map<std::string,std::string> pairs;
+    {std::lock_guard<std::mutex>lk(m_);move=transKind_==20;old=moveOld_;pairs=movePairs_;}
+    glBindFramebuffer(GL_FRAMEBUFFER,snapFbo_);glViewport(0,0,w,h);
+    if(move){
+        // Only what leaves goes into the snapshot (transparent around it); sources in both scenes glide live instead.
+        glClearColor(0,0,0,0);glClear(GL_COLOR_BUFFER_BIT);
+        std::vector<SourceLayer> rest;rest.reserve(layers.size());std::map<std::string,Geo> geo;
+        for(const auto& l:layers){
+            if(l.owner.empty()&&old.count(l.id)){geo[l.id]=Geo{l.x,l.y,l.w,l.h,l.pivotX,l.pivotY,l.rotation,l.scaleX,l.scaleY,l.opacity,l.cropL,l.cropT,l.cropR,l.cropB};continue;}
+            rest.push_back(l);
+        }
+        glEnable(GL_BLEND);glBlendFuncSeparate(GL_SRC_ALPHA,GL_ONE_MINUS_SRC_ALPHA,GL_ONE,GL_ONE_MINUS_SRC_ALPHA);
+        drawLayers(rest,std::string(),w,h,true);
+        std::map<std::string,Geo> from;for(const auto& [n,o]:pairs){auto it=geo.find(o);if(it!=geo.end())from[n]=it->second;}
+        std::lock_guard<std::mutex>lk(m_);moveFrom_=std::move(from);
+    }else{
+        drawTextureFull(canvasTex_,w,h,w,h,drawOutput_,drawOutput_);
+        glEnable(GL_BLEND);glBlendFuncSeparate(GL_SRC_ALPHA,GL_ONE_MINUS_SRC_ALPHA,GL_ONE,GL_ONE_MINUS_SRC_ALPHA);
+    }
+    glClearColor(0,0,0,1);
+    transPhase_=2;
+}
+void GlCompositor::applyMoveTransition(std::vector<SourceLayer>& layers,float e){
+    std::map<std::string,Geo> from;{std::lock_guard<std::mutex>lk(m_);from=moveFrom_;}
+    auto lerp=[e](float a,float b){return a+(b-a)*e;};
+    for(auto& l:layers){
+        if(!l.owner.empty()||!l.visible)continue;
+        auto it=from.find(l.id);
+        if(it==from.end()){l.opacity*=e;continue;} // only in the new scene: fades in
+        const Geo& g=it->second;
+        const float turn=std::fmod(l.rotation-g.rotation+540.f,360.f)-180.f; // the short way round
+        l.x=lerp(g.x,l.x);l.y=lerp(g.y,l.y);l.w=lerp(g.w,l.w);l.h=lerp(g.h,l.h);l.pivotX=lerp(g.pivotX,l.pivotX);l.pivotY=lerp(g.pivotY,l.pivotY);
+        l.rotation=g.rotation+turn*e;l.scaleX=lerp(g.scaleX,l.scaleX);l.scaleY=lerp(g.scaleY,l.scaleY);l.opacity=lerp(g.opacity,l.opacity);
+        l.cropL=lerp(g.cropL,l.cropL);l.cropT=lerp(g.cropT,l.cropT);l.cropR=lerp(g.cropR,l.cropR);l.cropB=lerp(g.cropB,l.cropB);
+    }
+}
+void GlCompositor::drawTransition(int w,int h,float p,float e){
+    glUseProgram(transProgram_);glBindVertexArray(vao_);glDisable(GL_BLEND);
+    glActiveTexture(GL_TEXTURE0);glBindTexture(GL_TEXTURE_2D,snapTex_);glUniform1i(tpOld_,0);
+    glActiveTexture(GL_TEXTURE1);glBindTexture(GL_TEXTURE_2D,transNewTex_);glUniform1i(tpNew_,1);
+    glUniform1i(tpKind_,transKind_);glUniform1f(tpP_,p);glUniform1f(tpE_,e);glUniform2f(tpRes_,static_cast<float>(w),static_cast<float>(h));
+    glDrawArrays(GL_TRIANGLE_STRIP,0,4);
+    glBindVertexArray(0);glEnable(GL_BLEND);
+    glBlendFuncSeparate(GL_SRC_ALPHA,GL_ONE_MINUS_SRC_ALPHA,GL_ONE,GL_ONE_MINUS_SRC_ALPHA);
+}
 void GlCompositor::renderTransitionOverlay(int width,int height){if(!overlayProgram_||transitionType_==0||transitionProgress_<=0.001f)return;glUseProgram(overlayProgram_);glBindVertexArray(vao_);glDisable(GL_DEPTH_TEST);glEnable(GL_BLEND);glBlendFunc(GL_SRC_ALPHA,GL_ONE_MINUS_SRC_ALPHA);GLint c=glGetUniformLocation(overlayProgram_,"uColor");float alpha=transitionProgress_;glUniform4f(c,transitionR_,transitionG_,transitionB_,alpha);glDrawArrays(GL_TRIANGLE_STRIP,0,4);}
 
 // Raw USB frames and bitmaps: storage is allocated once per size (glTexStorage2D) and each frame is a sub-image
@@ -602,6 +743,7 @@ std::vector<SourceLayer> GlCompositor::prepareFrame(){
             };
             colours(entry.first);
             layer.decodeKey=entry.first;layer.frameStamp=source.rawFrames;
+            {auto rl=rolls_.find(entry.first);layer.rolling=rl!=rolls_.end();if(layer.rolling)std::copy(rl->second.begin(),rl->second.end(),layer.roll);}
             {auto hl=hlgLook_.find(entry.first);if(hl!=hlgLook_.end()){layer.hlgMix=hl->second[0];layer.hlgGamut=hl->second[1];layer.hlgPeak=hl->second[2];}}
             if(blanks_.count(entry.first))layer.visible=false;
             {auto o=owners_.find(entry.first);layer.owner=o==owners_.end()?std::string():o->second;}
@@ -617,6 +759,7 @@ std::vector<SourceLayer> GlCompositor::prepareFrame(){
                 for(int i=0;i<16;++i)layer.texMatrix[i]=o.texMatrix[i];
                 {auto tf=transfers_.find(al->second);layer.transfer=tf==transfers_.end()?0:tf->second;}
                 colours(al->second);
+                {auto rl=rolls_.find(al->second);layer.rolling=rl!=rolls_.end();if(layer.rolling)std::copy(rl->second.begin(),rl->second.end(),layer.roll);}
                 if(t->second.pixelW>0&&t->second.pixelH>0&&layer.rawFormat==RawPixelFormat::NONE){layer.rawWidth=t->second.pixelW;layer.rawHeight=t->second.pixelH;}
                 layers.push_back(layer);
                 continue;
@@ -704,11 +847,21 @@ void GlCompositor::drawLayers(const std::vector<SourceLayer>& layers,const std::
         glUniform1i(u_.stageCount,(debugFlags_.load()&4)?0:layer.filterCount);
         {float su=0.f,sv=0.f;
          for(int i=0;i<layer.filterCount;++i)if(layer.filterTypes[i]==7){
-             static const auto epoch=std::chrono::steady_clock::now();
-             const double t=std::chrono::duration<double>(std::chrono::steady_clock::now()-epoch).count();
-             const double tw=std::max(1.0,static_cast<double>(layer.rawWidth>0?layer.rawWidth:layer.w)),th=std::max(1.0,static_cast<double>(layer.rawHeight>0?layer.rawHeight:layer.h));
+             // Timed by the frame's presentation slot, so every frame moves by the same amount (reading the clock while
+             // drawing moved it by whatever the render happened to take).
+             const double t=frameClockSec_;
+             // Speed is in the source's own pixels per second (OBS), so the whole source width, not the texture's pixel
+             // width: text drawn larger for sharpness scrolled slower, and jumped when it was redrawn at another size.
+             const double cw=std::max(1e-3,1.0-static_cast<double>(layer.cropL)-static_cast<double>(layer.cropR));
+             const double chh=std::max(1e-3,1.0-static_cast<double>(layer.cropT)-static_cast<double>(layer.cropB));
+             const double tw=std::max(1.0,static_cast<double>(layer.w)/cw),th=std::max(1.0,static_cast<double>(layer.h)/chh);
              su=static_cast<float>(std::fmod(layer.filterParams[i*kFilterStageFloats]*t/tw,1.0));sv=static_cast<float>(std::fmod(layer.filterParams[i*kFilterStageFloats+1]*t/th,1.0));}
          glUniform2f(u_.scroll,su,sv);}
+        if(layer.rolling){
+            const double strip=std::max(1.0,static_cast<double>(layer.roll[1]));
+            const float off=static_cast<float>(std::fmod(static_cast<double>(layer.roll[0])*frameClockSec_/strip,1.0));
+            glUniform1i(u_.rollOn,1);glUniform4f(u_.roll0,layer.roll[2],off,layer.roll[3],layer.roll[4]);glUniform4f(u_.roll1,layer.roll[5],layer.roll[6],layer.roll[7],0.f);
+        }else glUniform1i(u_.rollOn,0);
         if(layer.filterCount>0){
             int types[kMaxFilterStages];
             float lutMin[kMaxLutSlots*3]={},lutMax[kMaxLutSlots*3]={},lutSize[kMaxLutSlots]={2.f,2.f};
@@ -763,7 +916,7 @@ void GlCompositor::drawTextureFull(GLuint texture,int texW,int texH,int dstW,int
     glUniform2f(u_.scale,1,1);glUniform2f(u_.pivot,0,0);glUniform1f(u_.rot,0);glUniformMatrix4fv(u_.mat,1,GL_FALSE,flip);
     glUniform1f(u_.op,1);glUniform4f(u_.crop,0,0,1,1);glUniform1i(u_.fh,0);glUniform1i(u_.fv,0);glUniform1i(u_.stageCount,0);
     glUniform2f(u_.texel,1.f/std::max(1,texW),1.f/std::max(1,texH));glUniform2f(u_.rawSize,static_cast<float>(texW),static_cast<float>(texH));
-    glUniform1i(u_.sf,0);glUniform1i(u_.tf,signal);glUniform1i(u_.out,output);glUniform1i(u_.decodePass,0);glUniform2f(u_.scroll,0.f,0.f);glUniform1i(u_.hlgLook,0);
+    glUniform1i(u_.sf,0);glUniform1i(u_.tf,signal);glUniform1i(u_.out,output);glUniform1i(u_.decodePass,0);glUniform2f(u_.scroll,0.f,0.f);glUniform1i(u_.rollOn,0);glUniform1i(u_.hlgLook,0);
     glUniform1f(u_.sw,sdrWhite_.load());glUniform1f(u_.hp,hdrPeak_.load());glUniform1f(u_.refWhite,refWhiteFor(output));glUniform1f(u_.knee,kneeFor(output));
     glActiveTexture(GL_TEXTURE1);glBindTexture(GL_TEXTURE_2D,texture);
     glDrawArrays(GL_TRIANGLE_STRIP,0,4);
@@ -909,6 +1062,7 @@ void GlCompositor::loop(){
     while(running_){
         const auto frameStart=std::chrono::steady_clock::now();
         const int64_t slotNs=std::chrono::duration_cast<std::chrono::nanoseconds>(next.time_since_epoch()).count();
+        frameClockSec_=std::chrono::duration<double>(next.time_since_epoch()).count();
         const int canvasWidth=static_cast<int>(canvasW_.load());
         const int canvasHeight=static_cast<int>(canvasH_.load());
         {
@@ -951,6 +1105,13 @@ void GlCompositor::loop(){
             if(prepTiming)glBeginQuery(0x88BF,prepQ_[prepSet_]);
             std::vector<SourceLayer> layers=prepareFrame();
             decodeRawSources(layers);
+            int tphase=transPhase_.load();float tp=0.f,te=0.f;
+            if(tphase==3){
+                tp=std::clamp(std::chrono::duration<float,std::milli>(std::chrono::steady_clock::now()-transStart_).count()/static_cast<float>(std::max(1,transDurMs_)),0.f,1.f);
+                te=easeTransition(transKind_,tp);
+                if(tp>=1.f){transPhase_=0;tphase=0;}
+            }
+            if((tphase==2||tphase==3)&&transKind_==20)applyMoveTransition(layers,te);
             const auto tPrepared=std::chrono::steady_clock::now();
             smooth(tPrepare_,ms(frameStart,tPrepared));
             // The encoder gets the output's signal. The preview is SDR (HDR tone-mapped, as OBS's preview on an SDR screen),
@@ -967,7 +1128,7 @@ void GlCompositor::loop(){
             const auto tScenesDone=std::chrono::steady_clock::now();
             smooth(tScenes_,ms(tPrepared,tScenesDone));
             auto tPreviewStart=tScenesDone;
-            if(streaming&&canvasWidth>0&&canvasHeight>0){
+            if((streaming||tphase!=0)&&canvasWidth>0&&canvasHeight>0){
                 // Streaming: the canvas is drawn once, in the output's signal, and the encoder and the preview are scaled
                 // copies of it. Every source used to be drawn (and its 4K frame sampled) twice per frame, once per target.
                 const bool deep=output!=0||outputTenBit_.load();
@@ -985,16 +1146,17 @@ void GlCompositor::loop(){
                     canvasAllocW_=canvasWidth;canvasAllocH_=canvasHeight;canvasAllocHdr_=deep;
                 }
                 const int ts=timerSet_;const bool timing=timerOk_&&!timerPending_[ts];
-                glBindFramebuffer(GL_FRAMEBUFFER,canvasFbo_);
+                // While a transition shows, the new scene is drawn aside and mixed with the snapshot into the canvas.
+                const bool mixing=(tphase==2||tphase==3)&&ensureTransitionTargets(canvasWidth,canvasHeight,deep);
+                glBindFramebuffer(GL_FRAMEBUFFER,mixing?transNewFbo_:canvasFbo_);
                 glViewport(0,0,canvasWidth,canvasHeight);
                 if(timing)glBeginQuery(0x88BF/*GL_TIME_ELAPSED_EXT*/,timerQ_[ts][0]);
                 glClearColor(0,0,0,1);
                 glClear(GL_COLOR_BUFFER_BIT);
                 drawOutput_=output;
                 drawLayers(layers,std::string(),canvasWidth,canvasHeight,true);
-                glBindVertexArray(vao_);
-                renderTransitionOverlay(canvasWidth,canvasHeight);
-                glBindVertexArray(0);
+                if(tphase==1&&ensureTransitionTargets(canvasWidth,canvasHeight,deep))captureTransitionSnapshot(layers,canvasWidth,canvasHeight);
+                if(mixing){glBindFramebuffer(GL_FRAMEBUFFER,canvasFbo_);glViewport(0,0,canvasWidth,canvasHeight);drawTransition(canvasWidth,canvasHeight,tp,te);}
                 if(timing){glEndQuery(0x88BF);timerPending_[ts]=true;timerEnc_[ts]=false;}
                 {std::string path;{std::lock_guard<std::mutex> lock(m_);path.swap(grabPath_);}
                  if(!path.empty()){

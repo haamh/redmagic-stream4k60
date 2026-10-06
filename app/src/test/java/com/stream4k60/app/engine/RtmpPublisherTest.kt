@@ -57,11 +57,12 @@ class RtmpPublisherTest {
                 when (h[1]) {
                     1 -> chunkSize = ByteBuffer.wrap(body).int
                     9 -> { video += listOf(body[0].toInt() and 0xff, body[1].toInt() and 0xff); videoBodies += body }
-                    20 -> {
+                    18, 20 -> {
                         val values = Amf0(body).readAll()
                         val name = values[0] as String
-                        val tx = values[1] as Double
+                        val tx = if (h[1] == 20) values[1] as Double else 0.0
                         received += Received(name, h[2], values.getOrNull(2), values.drop(3))
+                        if (h[1] == 18) continue
                         when (name) {
                             // Shaped like YouTube's answer: over one 128-byte chunk, with an ECMA array (`data`).
                             "connect" -> send(o, 0, listOf("_result", tx,
@@ -105,6 +106,9 @@ class RtmpPublisherTest {
             val publish = ingest.received.first { it.name == "publish" }
             assertEquals(1, publish.messageStream)
             assertEquals(listOf("good-key", "live"), publish.args)
+
+            val metadata = ingest.received.first { it.name == "@setDataFrame" && it.commandObject == "onMetaData" }
+            assertTrue(metadata.args.single() is Ecma)
         } finally {
             publisher.stop()
         }
@@ -200,6 +204,14 @@ class RtmpPublisherTest {
             2 -> string()
             3 -> buildMap { while (true) { val k = string(); if (k.isEmpty() && b[p].toInt() == 9) { p++; break }; put(k, read()) } }
             5 -> null
+            8 -> {
+                val count = ByteBuffer.wrap(b, p, 4).int.also { p += 4 }
+                val m = buildMap<String, Any?> {
+                    repeat(count) { val k = string(); put(k, read()) }
+                }
+                if (b[p++].toInt() != 0 || b[p++].toInt() != 0 || b[p++].toInt() != 9) error("bad AMF0 ECMA array end")
+                Ecma(m)
+            }
             10 -> List(ByteBuffer.wrap(b, p, 4).int.also { p += 4 }) { read() }
             else -> error("AMF0 type $t")
         }

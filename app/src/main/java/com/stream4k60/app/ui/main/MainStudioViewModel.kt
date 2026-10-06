@@ -180,39 +180,21 @@ enum class StudioRecordState{IDLE,RECORDING,PAUSED,STOPPING,ERROR}
   val wanted=shown.mapNotNull{com.stream4k60.app.engine.SourceReferences.targetOf(it.configJson)}.filter{it !in shownIds}.toMutableSet()
   val shownDevices=shown.filter{it.type.equals("USB_CAPTURE",true)&&it.isVisible}.map{usbDeviceKey(it.configJson)}.toSet()
   val out=mutableListOf<SourceItem>();val scenesOf=mutableMapOf<String,String>()
+  // Keep only reference originals and the already-supported background USB captures alive. The transition work must not
+  // implicitly start every inactive scene media/browser/camera source: doing that can consume hardware decoder/GPU/USB
+  // resources before the stream encoder is created, and it was not part of the last known-good streaming path.
   for(sceneId in sceneIds){
    if(sceneId==activeId)continue
    for(row in repo.loadSources(sceneId)){
     if(row.id in shownIds||row.id in scenesOf)continue
     val item=toItem(row)
-    if(row.id in wanted){out+=item.copy(isVisible=true);scenesOf[row.id]=sceneId;continue}
-    if(!keepsRunningHidden(item,shownDevices))continue
-    // Browsers and media run hidden as they would in OBS, so "refresh / restart when the scene becomes active" still fire.
-    out+=item.copy(isVisible=item.type.uppercase() !in setOf("BROWSER","MEDIA"));scenesOf[row.id]=sceneId
+    val device=item.type.equals("USB_CAPTURE",true)&&item.isVisible&&com.stream4k60.app.engine.SourceReferences.targetOf(item.configJson)==null&&usbDeviceKey(item.configJson) !in shownDevices
+    if(row.id in wanted||device){out+=item.copy(isVisible=true);scenesOf[row.id]=sceneId}
    }
   }
   backingScenes=scenesOf
   _backingSources.value=out
  }
- /**
-  * Like OBS, switching scenes doesn't stop sources: the other scenes' visible sources keep running hidden, so switching
-  * back shows them at once (no camera restart, no page reload). Except what OBS also closes: media set to close when
-  * inactive, browsers set to shut down when hidden, and screen capture / nested scenes / audio-only sources.
-  */
- private fun keepsRunningHidden(item:SourceItem,shownDevices:Set<String>):Boolean{
-  if(!item.isVisible||com.stream4k60.app.engine.SourceReferences.targetOf(item.configJson)!=null)return false
-  val s=runCatching{org.json.JSONObject(item.configJson).let{it.optJSONObject("settings")?:it}}.getOrDefault(org.json.JSONObject())
-  return when(item.type.uppercase()){
-   "USB_CAPTURE"->usbDeviceKey(item.configJson) !in shownDevices
-   "MEDIA"->!s.optBoolean("closeWhenInactive",s.optBoolean("close_when_inactive",false))
-   "BROWSER"->!s.optBoolean("shutdownWhenHidden",s.optBoolean("shutdown",false))
-   "TEXT","IMAGE","IMAGE_SLIDESHOW","COLOR","CAMERA"->true
-   else->false
-  }
- }
- /** The capture device a USB source reads (its saved identity), so one camera isn't opened by two sources. */
- private fun usbDeviceKey(config:String):String=com.stream4k60.app.engine.UsbDeviceBinding.keyOf(config).ifBlank{
-  runCatching{org.json.JSONObject(config).let{it.optJSONObject("settings")?:it}.optInt("deviceId",-1).toString()}.getOrDefault(config)}
  private fun toItem(it:SourceEntity)=SourceItem(it.id,it.name,it.type,it.visible,it.locked,it.configJson,it.transformJson)
  /** Flattens the active scene plus every visible nested scene/group it shows, each nested canvas once. */
  private suspend fun expandRenderSources(top:List<SourceItem>,rootSceneId:String):List<RenderSource>{

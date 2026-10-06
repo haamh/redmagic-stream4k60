@@ -339,6 +339,7 @@ enum class StudioRecordState{IDLE,RECORDING,PAUSED,STOPPING,ERROR}
   streamId?:error("YouTube broadcast has no bound ingest stream; open that broadcast in YouTube Studio and pick it again.")
   var lastStatus:String?=null
   repeat(30){
+   if(startCancelled.value)error("Stopped while connecting")
    lastStatus=youTube().streamStatus(streamId)
    if(lastStatus.equals("active",true))return
    kotlinx.coroutines.delay(1000)
@@ -743,13 +744,16 @@ private suspend fun activateScene(collectionId:String,id:String){repo.loadScenes
    // A destination picked this session (YouTube picker / custom dialog) wins; otherwise use Settings → Stream.
    val destination=_streamConfig.value.takeIf{it.ingestionUrl.isNotBlank()}?.let{withCurrentOutput(it)}?:savedDestination()
    if(destination==null){_streamError.value="No stream destination yet. Open Settings → Stream, choose a service and paste your stream key.";return@launch}
-   runCatching{
+   try{
     engine.startStreaming(withReconnect(destination).copy(audioDeviceIds=routes.map{it.deviceId},audioInputs=routes,monitorDeviceId=monitor,monitorEnabled=monitor!=null,audioPlaybackCaptureEnabled=playback))
     // Do not finish the start operation merely because RTMPS/HLS accepted the connection. Confirm YouTube own status.
     waitForYouTubeIngest(destination)
+   }catch(t:Throwable){
+    // Provider-side verification can fail after the local publisher is already LIVE; tear it down rather than
+    // leaving a stream running behind an error message.
+    if(!startCancelled.value&&streamState.value in setOf(StudioStreamState.LIVE,StudioStreamState.RECONNECTING))runCatching{engine.stopStreaming()}
+    if(!startCancelled.value)_streamError.value=t.message ?: "Streaming could not start."
    }
-    // A start the user cancelled (Stop while connecting) is not an error.
-    .onFailure{if(!startCancelled.value)_streamError.value=it.message ?: "Streaming could not start."}
   }finally{startRequested.value=false}
  }
  fun stopStreaming()=viewModelScope.launch{if(startRequested.value)startCancelled.value=true;engine.stopStreaming()}

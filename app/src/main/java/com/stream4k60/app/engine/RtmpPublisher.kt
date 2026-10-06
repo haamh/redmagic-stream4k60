@@ -44,7 +44,7 @@ class RtmpPublisher(private val onState:(State,String)->Unit={_,_->}){
     private var videoWidth=3840
     private var videoHeight=2160
     private var videoFps=60;private var input:BufferedInputStream?=null;private var output:BufferedOutputStream?=null
-    private var streamId=1;private var outChunkSize=4096;private var inChunkSize=128;private var timestampBase=Long.MIN_VALUE
+    private var streamId=1;private var outChunkSize=4096;private var inChunkSize=128;private var timestampBaseUs=Long.MIN_VALUE
     private val bytesSent=AtomicLong();private val bytesReceived=AtomicLong();private val lock=Any();private var lastAck=0L;private var ackWindow=0L
     private val inStates=HashMap<Int,ChunkState>()
     private data class Outbound(val video:Boolean,val sample:HardwareVideoEncoder.Sample,val v:VideoCodecConfig?,val a:AudioCodecConfig?)
@@ -206,7 +206,7 @@ class RtmpPublisher(private val onState:(State,String)->Unit={_,_->}){
         sendCommand(0,"createStream",4,emptyList());val created=waitFor("createStream",4.0){it.command=="_result"&&it.transaction==4.0};streamId=created.values.lastOrNull{it is Double}?.let{(it as Double).toInt()}?:error("RTMP server did not return a stream id")
         // publish belongs to the stream createStream returned (chunk stream 8 carries that message stream id), not stream 0.
         sendCommand(8,"publish",5,listOf(key,"live"));waitFor("publish",5.0){it.command=="onStatus"&&it.info["code"]=="NetStream.Publish.Start"}
-        sendMetadata();timestampBase=Long.MIN_VALUE
+        sendMetadata();timestampBaseUs=Long.MIN_VALUE
         videoSequenceSent=false;audioSequenceSent=false;waitingForKeyframe=true
         if(stopRequested)error("Stopped while connecting")
         state=State.PUBLISHING;onState(state,"Publishing")
@@ -221,7 +221,7 @@ class RtmpPublisher(private val onState:(State,String)->Unit={_,_->}){
                 val item=outbound.take()
                 if(!writerRunning)break
                 if(item.video){
-                    val s=item.sample;val ts=timestamp(s.ptsUs)
+                    val s=item.sample;val ts=timestamp(s.ptsUs,s.codecConfig)
                     if(s.codecConfig&&item.v?.codec==OutputCodec.HEVC)colorInfo?.let{writeMessage(0x09,6,ts,FlvMetadata.colorInfo(it))}
                     val body=if(s.codecConfig)flvVideoSequence(item.v?:return)else flvVideoFrame(s.data,s.keyframe, videoCodec)
                     writeMessage(0x09,6,ts,body)
@@ -252,7 +252,7 @@ class RtmpPublisher(private val onState:(State,String)->Unit={_,_->}){
                 handleControl(m)
                 when(m.type){
                     // User control event 6 = ping request: answer 7 with the same timestamp.
-                    4->if(m.body.size>=6&&m.body[0].toInt()==0&&m.body[1].toInt()==6)synchronized(lock){writeMessageRaw(4,2,0,byteArrayOf(0,7)+m.body.copyOfRange(2,6));output?.flush()}
+                    4->if(m.body.size>=6&&m.body[0].toInt()==0&&m.body[1].toInt()==6)synchronized(lock){writeMessageRaw(4,2,0L,byteArrayOf(0,7)+m.body.copyOfRange(2,6));output?.flush()}
                     20,17->Amf.decodeCommand(m.body)?.let{c->
                         if(c.command=="onStatus"||c.command=="_error"||c.command=="close")
                             onState(state,"Server says ${c.info["code"]?:c.command}${c.info["description"]?.let{" ($it)"}.orEmpty()}")
@@ -312,9 +312,15 @@ class RtmpPublisher(private val onState:(State,String)->Unit={_,_->}){
         val body=Amf.encode(listOf("@setDataFrame","onMetaData",meta));writeMessage(0x12,5,0,body)
     }
 
-    private fun timestamp(ptsUs:Long):Int{if(timestampBase==Long.MIN_VALUE)timestampBase=ptsUs;return ((ptsUs-timestampBase)/1000L).coerceIn(0,0xFFFFFFFFL).toInt()}
+    private fun timestamp(ptsUs:Long,setup:Boolean=false):Long{
+        // Codec-config buffers are not media-time anchors: some MediaCodec encoders report their config PTS as 0.
+        // Anchor RTMP time on the first actual media sample so absolute CLOCK_MONOTONIC values never become stream time.
+        if(!setup&&timestampBaseUs==Long.MIN_VALUE)timestampBaseUs=ptsUs
+        if(timestampBaseUs==Long.MIN_VALUE)return 0L
+        return ((ptsUs-timestampBaseUs)/1000L).coerceIn(0L,0xFFFFFFFFL)
+    }
 
-    private fun writeMessage(type:Int,chunkStreamId:Int,ts:Int,body:ByteArray){synchronized(lock){val o=output?:return;var off=0;var first=true;val msgStream=when(chunkStreamId){4,5,6,8->streamId else->0};while(first||off<body.size){val n=minOf(outChunkSize,body.size-off);val useFmt=if(first)0 else 3;writeBasicHeader(o,useFmt,chunkStreamId);if(first){val ext=if(ts>=0xFFFFFF)0xFFFFFF else ts;writeU24(o,ext);writeU24(o,body.size);o.write(type);writeU32LE(o,msgStream);if(ts>=0xFFFFFF)writeU32BE(o,ts.toLong() and 0xffffffffL)}else if(ts>=0xFFFFFF){writeU32BE(o,ts.toLong() and 0xffffffffL)};o.write(body,off,n);off+=n;first=false};o.flush();bytesSent.addAndGet(body.size.toLong())}}
+    private fun writeMessage(type:Int,chunkStreamId:Int,ts:Long,body:ByteArray){synchronized(lock){val o=output?:return;var off=0;var first=true;val msgStream=when(chunkStreamId){4,5,6,8->streamId else->0};while(first||off<body.size){val n=minOf(outChunkSize,body.size-off);val useFmt=if(first)0 else 3;writeBasicHeader(o,useFmt,chunkStreamId);if(first){val ext=if(ts>=0xFFFFFFL)0xFFFFFF else ts.toInt();writeU24(o,ext);writeU24(o,body.size);o.write(type);writeU32LE(o,msgStream);if(ts>=0xFFFFFFL)writeU32BE(o,ts and 0xffffffffL)}else if(ts>=0xFFFFFFL){writeU32BE(o,ts and 0xffffffffL)};o.write(body,off,n);off+=n;first=false};o.flush();bytesSent.addAndGet(body.size.toLong())}}
 
     private fun writeBasicHeader(o:BufferedOutputStream,fmt:Int,csid:Int){require(csid in 2..65599);val f=fmt shl 6;when{csid<64->o.write(f or csid);csid<320-> {o.write(f);o.write(csid-64)};else->{o.write(f or 1);val n=csid-64;o.write(n and 0xff);o.write(n ushr 8)}}}
 
@@ -356,10 +362,10 @@ class RtmpPublisher(private val onState:(State,String)->Unit={_,_->}){
         val body=st.buffer.toByteArray();bytesReceived.addAndGet(body.size.toLong());val msg=InMessage(st.type,st.streamId,st.timestamp,body);st.buffer.reset();st.remaining=0;return msg
     }
 
-    private fun handleControl(m:InMessage){when(m.type){1->if(m.body.size>=4){inChunkSize=readU32BE(m.body).toInt().coerceIn(128,1024*1024)};5->if(m.body.size>=4){ackWindow=readU32BE(m.body);};6->{if(m.body.size>=8)ackWindow=readU32BE(m.body);};3->{/* acknowledgement */};8,9,18->{}};if(ackWindow>0&&bytesReceived.get()-lastAck>=ackWindow){val b=ByteArray(4);writeU32BE(b,bytesReceived.get() and 0xffffffffL);writeMessageRaw(3,2,0,b);lastAck=bytesReceived.get()}}
+    private fun handleControl(m:InMessage){when(m.type){1->if(m.body.size>=4){inChunkSize=readU32BE(m.body).toInt().coerceIn(128,1024*1024)};5->if(m.body.size>=4){ackWindow=readU32BE(m.body);};6->{if(m.body.size>=8)ackWindow=readU32BE(m.body);};3->{/* acknowledgement */};8,9,18->{}};if(ackWindow>0&&bytesReceived.get()-lastAck>=ackWindow){val b=ByteArray(4);writeU32BE(b,bytesReceived.get() and 0xffffffffL);writeMessageRaw(3,2,0L,b);lastAck=bytesReceived.get()}}
 
     // Locked like writeMessage: the reader thread's acks/pings must not interleave with media chunks.
-    private fun writeMessageRaw(type:Int,chunkStreamId:Int,ts:Int,body:ByteArray){synchronized(lock){val o=output?:return;writeBasicHeader(o,0,chunkStreamId);writeU24(o,ts.coerceAtMost(0xFFFFFF));writeU24(o,body.size);o.write(type);writeU32LE(o,0);o.write(body);o.flush()}}
+    private fun writeMessageRaw(type:Int,chunkStreamId:Int,ts:Long,body:ByteArray){synchronized(lock){val o=output?:return;writeBasicHeader(o,0,chunkStreamId);writeU24(o,ts.coerceAtMost(0xFFFFFFL).toInt());writeU24(o,body.size);o.write(type);writeU32LE(o,0);o.write(body);o.flush()}}
 
     private fun handshake(){val o=output?:error("No RTMP output");val i=input?:error("No RTMP input");o.write(3);val time=(System.currentTimeMillis()/1000).toInt();writeU32BE(o,time.toLong());writeU32BE(o,0);val c1=ByteArray(1528);Random.nextBytes(c1);o.write(c1);o.flush();require(i.read()==3){"Invalid RTMP S0"};val s1=ByteArray(1536);readFully(i,s1);val s2=ByteArray(1536);readFully(i,s2);o.write(s1);o.flush();/* C2 sent */}
 

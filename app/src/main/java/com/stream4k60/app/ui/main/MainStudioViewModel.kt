@@ -312,23 +312,6 @@ enum class StudioRecordState{IDLE,RECORDING,PAUSED,STOPPING,ERROR}
  val liveState=combine(_liveState,_streamConfig){s,c->if(c.broadcastId.isNullOrBlank())StudioLiveState.UNAVAILABLE else s}
   .stateIn(viewModelScope,SharingStarted.Eagerly,StudioLiveState.UNAVAILABLE)
  private fun youTube()=com.stream4k60.app.youtube.YouTubeService{com.stream4k60.app.youtube.YouTubeAuthSession.accessToken}
- private suspend fun waitForYouTubeIngest(config:StreamConfig){
-  if(config.service!=StreamService.YOUTUBE||config.broadcastId.isNullOrBlank())return
-  // A saved manual RTMPS destination may not have a YouTube OAuth session; without OAuth we cannot verify
-  // provider-side ingest, so the generic publisher readiness check remains the source of truth.
-  if(com.stream4k60.app.youtube.YouTubeAuthSession.accessToken==null)return
-  val (_,streamId)=youTube().broadcastState(config.broadcastId)
-  streamId?:error("YouTube broadcast has no bound ingest stream; open that broadcast in YouTube Studio and pick it again.")
-  var lastStatus:String?=null
-  repeat(30){
-   if(startCancelled.value)error("Stopped while connecting")
-   lastStatus=youTube().streamStatus(streamId)
-   if(lastStatus.equals("active",true))return
-   kotlinx.coroutines.delay(1000)
-  }
-  error("Video was sent to YouTube, but YouTube did not report the bound stream as receiving it"+
-    (lastStatus?.let{" (status: $it)"}.orEmpty())+".")
- }
  fun goLive()=viewModelScope.launch{
   val id=_streamConfig.value.broadcastId?:return@launch
   if(com.stream4k60.app.youtube.YouTubeAuthSession.accessToken==null){_streamError.value="Connect YouTube in Manage Broadcast to go live from here.";return@launch}
@@ -726,16 +709,9 @@ private suspend fun activateScene(collectionId:String,id:String){repo.loadScenes
    // A destination picked this session (YouTube picker / custom dialog) wins; otherwise use Settings → Stream.
    val destination=_streamConfig.value.takeIf{it.ingestionUrl.isNotBlank()}?.let{withCurrentOutput(it)}?:savedDestination()
    if(destination==null){_streamError.value="No stream destination yet. Open Settings → Stream, choose a service and paste your stream key.";return@launch}
-   try{
-    engine.startStreaming(withReconnect(destination).copy(audioDeviceIds=routes.map{it.deviceId},audioInputs=routes,monitorDeviceId=monitor,monitorEnabled=monitor!=null,audioPlaybackCaptureEnabled=playback))
-    // Do not finish the start operation merely because RTMPS/HLS accepted the connection. Confirm YouTube own status.
-    waitForYouTubeIngest(destination)
-   }catch(t:Throwable){
-    // Provider-side verification can fail after the local publisher is already LIVE; tear it down rather than
-    // leaving a stream running behind an error message.
-    if(!startCancelled.value&&streamState.value in setOf(StudioStreamState.LIVE,StudioStreamState.RECONNECTING))runCatching{engine.stopStreaming()}
-    if(!startCancelled.value)_streamError.value=t.message ?: "Streaming could not start."
-   }
+   runCatching{engine.startStreaming(withReconnect(destination).copy(audioDeviceIds=routes.map{it.deviceId},audioInputs=routes,monitorDeviceId=monitor,monitorEnabled=monitor!=null,audioPlaybackCaptureEnabled=playback))}
+    // A start the user cancelled (Stop while connecting) is not an error.
+    .onFailure{if(!startCancelled.value)_streamError.value=it.message ?: "Streaming could not start."}
   }finally{startRequested.value=false}
  }
  fun stopStreaming()=viewModelScope.launch{if(startRequested.value)startCancelled.value=true;engine.stopStreaming()}

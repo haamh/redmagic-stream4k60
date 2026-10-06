@@ -659,6 +659,14 @@ private suspend fun activateScene(collectionId:String,id:String){repo.loadScenes
   updateSourceConfig(src.id,j.toString())
  }
  val generalSettings=settingsRepository.generalSettings.stateIn(viewModelScope,SharingStarted.Eagerly,GeneralSettings())
+ private fun youtubeBitrate(bitrate:Int,codec:OutputCodec,width:Int,height:Int,fps:Int):Int{
+  if(fps<60||maxOf(width,height)<3840||minOf(width,height)<2160)return bitrate
+  return when(codec){
+   OutputCodec.HEVC->bitrate.coerceIn(10_000_000,40_000_000)
+   OutputCodec.H264->bitrate.coerceIn(14_000_000,50_000_000)
+   else->bitrate
+  }
+ }
  /** Destination saved in Settings → Stream, with the current Output/Video settings. */
  private suspend fun savedDestination():StreamConfig?{
   val s=settingsRepository.streamSettings.first()
@@ -671,7 +679,7 @@ private suspend fun activateScene(collectionId:String,id:String){repo.loadScenes
    outputCodec=v.outputCodec,outputWidth=v.outputResWidth,outputHeight=v.outputResHeight,
    // YouTube, Twitch, Facebook and Kick ingest accept at most 60 FPS; only a custom server gets 120.
    fps=if(s.service!=StreamService.CUSTOM)v.frameRate.coerceAtMost(60)else v.frameRate,
-   bitrate=v.videoBitrateKbps*1_000,
+   bitrate=youtubeBitrate(v.videoBitrateKbps*1_000,v.outputCodec,v.outputResWidth,v.outputResHeight,v.frameRate.coerceAtMost(60)),
    audioBitrate=v.audioBitrateKbps*1_000,
    rateControl=v.rateControl,
    dynamicBitrate=v.dynamicBitrate,
@@ -686,7 +694,8 @@ private suspend fun activateScene(collectionId:String,id:String){repo.loadScenes
   val v=settingsRepository.videoConfig.first()
   return d.copy(outputCodec=v.outputCodec,outputWidth=v.outputResWidth,outputHeight=v.outputResHeight,
    fps=if(d.service!=StreamService.CUSTOM)v.frameRate.coerceAtMost(60)else v.frameRate,
-   bitrate=v.videoBitrateKbps*1_000,audioBitrate=v.audioBitrateKbps*1_000,rateControl=v.rateControl,dynamicBitrate=v.dynamicBitrate,color=v.outputColor)
+   bitrate=if(d.service==StreamService.YOUTUBE)youtubeBitrate(v.videoBitrateKbps*1_000,v.outputCodec,v.outputResWidth,v.outputResHeight,v.frameRate.coerceAtMost(60)) else v.videoBitrateKbps*1_000,
+   audioBitrate=v.audioBitrateKbps*1_000,rateControl=v.rateControl,dynamicBitrate=v.dynamicBitrate,color=v.outputColor)
  }
  private fun withReconnect(c:StreamConfig):StreamConfig{val a=advancedSettings.value;return c.copy(autoReconnect=a.autoReconnect,reconnectDelayMs=a.reconnectDelaySec*1_000L,maxReconnectAttempts=if(a.autoReconnect)a.maxRetries else 0)}
  /** Set from the tap on Start until the engine has connected or failed, so the button reacts at once. */

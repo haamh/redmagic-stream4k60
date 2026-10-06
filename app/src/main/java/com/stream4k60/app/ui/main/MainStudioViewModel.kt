@@ -178,7 +178,7 @@ enum class StudioRecordState{IDLE,RECORDING,PAUSED,STOPPING,ERROR}
   val shown=_renderSources.value.map{it.item}
   val shownIds=shown.map{it.id}.toSet()
   val wanted=shown.mapNotNull{com.stream4k60.app.engine.SourceReferences.targetOf(it.configJson)}.filter{it !in shownIds}.toMutableSet()
-  val shownDevices=shown.filter{it.type.equals("USB_CAPTURE",true)&&it.isVisible}.map{UsbAudioSources.keyOf(it.configJson)}.toSet()
+  val shownDevices=shown.filter{it.type.equals("USB_CAPTURE",true)&&it.isVisible}.map{usbDeviceKey(it.configJson)}.toSet()
   val out=mutableListOf<SourceItem>();val scenesOf=mutableMapOf<String,String>()
   // Keep only reference originals and the already-supported background USB captures alive. The transition work must not
   // implicitly start every inactive scene media/browser/camera source: doing that can consume hardware decoder/GPU/USB
@@ -188,13 +188,16 @@ enum class StudioRecordState{IDLE,RECORDING,PAUSED,STOPPING,ERROR}
    for(row in repo.loadSources(sceneId)){
     if(row.id in shownIds||row.id in scenesOf)continue
     val item=toItem(row)
-    val device=item.type.equals("USB_CAPTURE",true)&&item.isVisible&&com.stream4k60.app.engine.SourceReferences.targetOf(item.configJson)==null&&UsbAudioSources.keyOf(item.configJson) !in shownDevices
+    val device=item.type.equals("USB_CAPTURE",true)&&item.isVisible&&com.stream4k60.app.engine.SourceReferences.targetOf(item.configJson)==null&&usbDeviceKey(item.configJson) !in shownDevices
     if(row.id in wanted||device){out+=item.copy(isVisible=true);scenesOf[row.id]=sceneId}
    }
   }
   backingScenes=scenesOf
   _backingSources.value=out
  }
+ /** The capture device a USB source reads (its saved identity), so one camera isn't opened by two sources. */
+ private fun usbDeviceKey(config:String):String=com.stream4k60.app.engine.UsbDeviceBinding.keyOf(config).ifBlank{
+  runCatching{org.json.JSONObject(config).let{it.optJSONObject("settings")?:it}.optInt("deviceId",-1).toString()}.getOrDefault(config)}
  private fun toItem(it:SourceEntity)=SourceItem(it.id,it.name,it.type,it.visible,it.locked,it.configJson,it.transformJson)
  /** Flattens the active scene plus every visible nested scene/group it shows, each nested canvas once. */
  private suspend fun expandRenderSources(top:List<SourceItem>,rootSceneId:String):List<RenderSource>{

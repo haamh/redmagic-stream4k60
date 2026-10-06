@@ -140,8 +140,8 @@ class StreamEngineImpl @Inject constructor(@ApplicationContext private val conte
                     StreamLog.add("YouTube ingest: $summary")
                     lastSummary=summary
                 }
-                if(health.streamStatus.equals("active",true)){
-                    if(health.issues.isNotEmpty()) StreamLog.add("YouTube ingest active with issues: ${health.issues.joinToString{"${it.severity}:${it.type}"}}")
+                if(health.streamStatus.equals("active",true) && !health.fatal){
+                    if(health.issues.isNotEmpty()) StreamLog.add("YouTube ingest active with warnings: ${health.issues.joinToString{"${it.severity}:${it.type}"}}")
                     return true
                 }
 

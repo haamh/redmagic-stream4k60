@@ -62,6 +62,7 @@ class RtmpPublisher(private val onState:(State,String)->Unit={_,_->}){
     @Volatile private var videoSequenceSent=false
     @Volatile private var audioSequenceSent=false
     @Volatile private var waitingForKeyframe=true
+    @Volatile private var firstMediaTimestampLogged=false
     /** Asked after each (re)connect so the next video frame is a keyframe instead of waiting a full GOP. */
     @Volatile var onKeyframeNeeded:(()->Unit)?=null
     private var reconnectThread:Thread?=null
@@ -206,7 +207,7 @@ class RtmpPublisher(private val onState:(State,String)->Unit={_,_->}){
         sendCommand(0,"createStream",4,emptyList());val created=waitFor("createStream",4.0){it.command=="_result"&&it.transaction==4.0};streamId=created.values.lastOrNull{it is Double}?.let{(it as Double).toInt()}?:error("RTMP server did not return a stream id")
         // publish belongs to the stream createStream returned (chunk stream 8 carries that message stream id), not stream 0.
         sendCommand(8,"publish",5,listOf(key,"live"));waitFor("publish",5.0){it.command=="onStatus"&&it.info["code"]=="NetStream.Publish.Start"}
-        sendMetadata();timestampBaseUs=Long.MIN_VALUE
+        sendMetadata();timestampBaseUs=Long.MIN_VALUE;firstMediaTimestampLogged=false
         videoSequenceSent=false;audioSequenceSent=false;waitingForKeyframe=true
         if(stopRequested)error("Stopped while connecting")
         state=State.PUBLISHING;onState(state,"Publishing")
@@ -222,12 +223,14 @@ class RtmpPublisher(private val onState:(State,String)->Unit={_,_->}){
                 if(!writerRunning)break
                 if(item.video){
                     val s=item.sample;val ts=timestamp(s.ptsUs,s.codecConfig)
+                    if(!s.codecConfig&&!firstMediaTimestampLogged){firstMediaTimestampLogged=true;StreamLog.add("RTMP first video PTS ${s.ptsUs} -> ${ts} ms")}
                     if(s.codecConfig&&item.v?.codec==OutputCodec.HEVC)colorInfo?.let{writeMessage(0x09,6,ts,FlvMetadata.colorInfo(it))}
                     val body=if(s.codecConfig)flvVideoSequence(item.v?:return)else flvVideoFrame(s.data,s.keyframe, videoCodec)
                     writeMessage(0x09,6,ts,body)
                     if(!s.codecConfig)sentVideoFrames++
                 }else{
                     val s=item.sample;val ts=timestamp(s.ptsUs,s.codecConfig)
+                    if(!s.codecConfig&&!firstMediaTimestampLogged){firstMediaTimestampLogged=true;StreamLog.add("RTMP first audio PTS ${s.ptsUs} -> ${ts} ms")}
                     val body=if(s.codecConfig)flvAudioSequence(item.a?:return)else flvAudioRaw(s.data)
                     writeMessage(0x08,4,ts,body)
                 }

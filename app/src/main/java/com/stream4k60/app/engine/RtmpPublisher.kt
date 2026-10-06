@@ -312,7 +312,7 @@ class RtmpPublisher(private val onState:(State,String)->Unit={_,_->}){
             "stereo" to true,
             "2.0" to 2.0
         )
-        val body=Amf.encode(listOf("@setDataFrame","onMetaData",meta));writeMessage(0x12,5,0,body)
+        val body=Amf.encode(listOf("@setDataFrame","onMetaData",Amf.EcmaArray(meta)));writeMessage(0x12,5,0,body)
     }
 
     private fun timestamp(ptsUs:Long,setup:Boolean=false):Long{
@@ -511,8 +511,9 @@ class RtmpPublisher(private val onState:(State,String)->Unit={_,_->}){
     private fun writeU32(o:ByteArrayOutputStream,v:Int){o.write(v ushr 24);o.write(v ushr 16);o.write(v ushr 8);o.write(v)}
 
     private object Amf{
+        data class EcmaArray(val properties:Map<String,Any?>)
         fun encode(v:List<Any?>):ByteArray{val o=ByteArrayOutputStream();v.forEach{write(o,it)};return o.toByteArray()}
-        private fun write(o:ByteArrayOutputStream,v:Any?){when(v){null->o.write(5);is String->{o.write(2);writeUtf(o,v)};is Double->{o.write(0);writeLong(o,java.lang.Double.doubleToRawLongBits(v))};is Float->{o.write(0);writeLong(o,java.lang.Double.doubleToRawLongBits(v.toDouble()))};is Boolean->{o.write(1);o.write(if(v)1 else 0)};is List<*>->{o.write(10);writeInt32(o,v.size);v.forEach{write(o,it)}};is Map<*,*>->{o.write(3);for((k,x)in v){writeShort(o,k.toString().length);o.write(k.toString().toByteArray());write(o,x)};o.write(0);o.write(0);o.write(9)};else->write(o,v.toString())}}
+        private fun write(o:ByteArrayOutputStream,v:Any?){when(v){null->o.write(5);is String->{o.write(2);writeUtf(o,v)};is Double->{o.write(0);writeLong(o,java.lang.Double.doubleToRawLongBits(v))};is Float->{o.write(0);writeLong(o,java.lang.Double.doubleToRawLongBits(v.toDouble()))};is Boolean->{o.write(1);o.write(if(v)1 else 0)};is List<*>->{o.write(10);writeInt32(o,v.size);v.forEach{write(o,it)}};is Map<*,*>->{o.write(3);for((k,x)in v){writeShort(o,k.toString().length);o.write(k.toString().toByteArray());write(o,x)};o.write(0);o.write(0);o.write(9)};is EcmaArray->{o.write(8);writeInt32(o,v.properties.size);for((k,x)in v.properties){writeShort(o,k.length);o.write(k.toByteArray());write(o,x)};o.write(0);o.write(0);o.write(9)};else->write(o,v.toString())}}
         private fun writeUtf(o:ByteArrayOutputStream,s:String){val b=s.toByteArray();writeShort(o,b.size);o.write(b)};private fun writeShort(o:ByteArrayOutputStream,v:Int){o.write(v ushr 8);o.write(v)};private fun writeInt32(o:ByteArrayOutputStream,v:Int){o.write(v ushr 24);o.write(v ushr 16);o.write(v ushr 8);o.write(v)};private fun writeLong(o:ByteArrayOutputStream,v:Long){for(s in 56 downTo 0 step 8)o.write((v ushr s).toInt())}
         data class Decoded(val command:String,val transaction:Double,val values:List<Any?>,val info:Map<String,String>)
         fun decodeCommand(b:ByteArray):Command?{val r=Reader(b);val command=r.read() as? String?:return null;val tx=(r.read() as? Double)?:0.0;val values=mutableListOf<Any?>();try{while(r.remaining()>0)values.add(r.read())}catch(_:IndexOutOfBoundsException){};val info=values.flatMap{(it as? Map<*,*>)?.entries?:emptySet()}.associate{it.key.toString() to it.value.toString()};return Command(command,tx,values,info)}

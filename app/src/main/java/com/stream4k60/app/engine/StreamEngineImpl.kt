@@ -113,6 +113,65 @@ class StreamEngineImpl @Inject constructor(@ApplicationContext private val conte
         }
     }
 
+    /**
+     * YouTube has a second, API-level validation path that is separate from the RTMP publish handshake.
+     * Wait for that ingest state before declaring a YouTube stream usable. When the stream is still inactive,
+     * re-issue an IDR request after the encoder is actually running; the old request was made too early.
+     */
+    private suspend fun awaitYouTubeIngest(config:StreamConfig, output:StreamOutputSession, timeoutMs:Long):Boolean {
+        val broadcastId=config.broadcastId ?: return true
+        val yt=YouTubeService{YouTubeAuthSession.accessToken}
+        val streamId=runCatching { yt.broadcastState(broadcastId).second }.getOrElse {
+            StreamLog.add("YouTube ingest: cannot resolve bound stream: ${it.message}")
+            return false
+        } ?: run {
+            StreamLog.add("YouTube ingest: broadcast has no bound live stream")
+            return false
+        }
+
+        val deadline=System.nanoTime()+timeoutMs*1_000_000L
+        var lastSummary=""
+        var nextKeyframeNs=0L
+        while(System.nanoTime()<deadline){
+            val health=runCatching { yt.streamHealth(streamId) }.getOrNull()
+            if(health!=null){
+                val summary=health.summary()
+                if(summary!=lastSummary){
+                    StreamLog.add("YouTube ingest: $summary")
+                    lastSummary=summary
+                }
+                if(health.streamStatus.equals("active",true)){
+                    if(health.issues.isNotEmpty()) StreamLog.add("YouTube ingest active with issues: ${health.issues.joinToString{"${it.severity}:${it.type}"}}")
+                    return true
+                }
+
+                // These are the two YouTube states where an extra IDR is useful while the ingest path is waiting for
+                // a decodable video start. Do not hammer the encoder: at most once every 3 seconds.
+                val needsIdr=health.issues.any{it.type=="noVideoStream"||it.type=="videoIngestionStarved"} || health.streamStatus.equals("inactive",true)
+                val now=System.nanoTime()
+                if(needsIdr && now>=nextKeyframeNs){
+                    runCatching{output.requestKeyframe()}
+                    StreamLog.add("YouTube ingest: stream not active; requested another video keyframe")
+                    nextKeyframeNs=now+3_000_000_000L
+                }
+
+                // A YouTube error-severity issue cannot be fixed by waiting for more data; surface the exact API
+                // diagnosis instead of falling back to the generic "Connect encoder" state.
+                if(health.fatal){
+                    StreamLog.add("YouTube ingest ERROR: ${health.summary()}")
+                }
+            } else {
+                StreamLog.add("YouTube ingest: health query failed; retrying")
+            }
+            delay(1_500)
+        }
+
+        val final=runCatching { yt.streamHealth(streamId) }.getOrNull()
+        val reason=final?.summary() ?: "YouTube health status unavailable"
+        StreamLog.add("YouTube ingest TIMEOUT: $reason")
+        return false
+    }
+
     override suspend fun startStreaming(config:StreamConfig){
         require(config.ingestionUrl.isNotBlank()){"Set a server in Settings → Stream first"}
         // Every service (YouTube, Twitch, Facebook, Kick, custom) takes RTMP(S); YouTube's API broadcasts can also use HLS.
@@ -130,7 +189,12 @@ class StreamEngineImpl @Inject constructor(@ApplicationContext private val conte
                 val s=StreamOutputSession(context,::onPublisherState);session=s
                 s.prepareAndStart(config)
                 check(!startCancelled){"Stopped while connecting"}
-                check(s.awaitPublisherReady(if(config.protocol==StreamProtocol.HLS)15_000 else 20_000)){"YouTube ingestion did not become ready"}
+                check(s.awaitPublisherReady(if(config.protocol==StreamProtocol.HLS)15_000 else 20_000)){"Encoder output did not start"}
+                if(config.service==StreamService.YOUTUBE && config.broadcastId!=null){
+                    check(awaitYouTubeIngest(config,s,30_000)){
+                        "YouTube did not accept the incoming stream within 30 seconds. Check stream-log for the exact ingest health issue."
+                    }
+                }
                 // Streaming only sends video to YouTube. Taking the broadcast live is Go Live (MainStudioViewModel.goLive);
                 // doing it here kept the button on "Connecting" for up to a minute and went live without being asked.
                 check(!startCancelled){"Stopped while connecting"}

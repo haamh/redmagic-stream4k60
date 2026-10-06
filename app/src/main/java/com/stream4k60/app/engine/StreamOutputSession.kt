@@ -95,6 +95,12 @@ class StreamOutputSession(
             }
         }
         encoder!!.start()
+        // The RTMP publisher can ask for an IDR while the encoder is only configured, before MediaCodec.start().
+        // That request is easy to lose on hardware encoders, so request a fresh keyframe once the encoder is actually running.
+        if (config.protocol == StreamProtocol.RTMP || config.protocol == StreamProtocol.RTMPS) {
+            runCatching { encoder?.requestKeyframe() }
+            StreamLog.add("Video encoder: requested initial keyframe after start")
+        }
         val routes = if (config.audioInputs.isNotEmpty()) config.audioInputs else resolveAudioDeviceIds(config.audioDeviceIds, audioDevice).map { id -> com.stream4k60.app.data.model.AudioInputRoute("audio_device_$id", id) }
         if (routes.isNotEmpty() || config.audioPlaybackCaptureEnabled) {
             audio=HardwareAudioEncoder(context,bitrate=config.audioBitrate,onSample={sample->

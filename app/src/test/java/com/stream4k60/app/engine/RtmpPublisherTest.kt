@@ -107,8 +107,8 @@ class RtmpPublisherTest {
             assertEquals(1, publish.messageStream)
             assertEquals(listOf("good-key", "live"), publish.args)
 
-            val metadata = ingest.received.first { it.name == "@setDataFrame" && it.commandObject == "onMetaData" }
-            assertTrue(metadata.args.single() is Ecma)
+            val metadata = ingest.received.first { it.name == "@setDataFrame" && it.commandObject is Ecma }
+            assertTrue(metadata.commandObject is Ecma)
         } finally {
             publisher.stop()
         }

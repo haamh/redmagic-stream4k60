@@ -111,10 +111,27 @@ class YouTubeBroadcastPickerViewModel @Inject constructor(
         val protocol = if (useHls) StreamProtocol.HLS else StreamProtocol.RTMPS
         val ingestUrl = if (protocol == StreamProtocol.RTMPS) broadcast.rtmpsUrl ?: broadcast.ingestionUrl else broadcast.ingestionUrl
         val codec = video.outputCodec
+        require(codec == OutputCodec.H264 || codec == OutputCodec.HEVC) {
+            "YouTube RTMPS currently supports H.264/HEVC in this app; choose H.264 or HEVC in Settings → Output."
+        }
         val mime = if (codec == OutputCodec.HEVC) "video/hevc" else "video/avc"
         require(HardwareVideoEncoder.supportsResolution(mime, width, height, fps)) {
             "The selected ${codec.name} hardware encoder does not support ${width} × ${height} at $fps FPS on this device."
         }
+
+        // YouTube's current 4K60 ingest limits are codec-specific. Clamp only the value sent to YouTube so an
+        // old profile cannot request an invalid HEVC rate (for example 50 Mbps HEVC; YouTube lists 40 Mbps max).
+        val longSide = maxOf(width, height)
+        val shortSide = minOf(width, height)
+        val requestedBitrate = video.videoBitrateKbps * 1_000
+        val youtubeBitrate = if (longSide >= 3840 && shortSide >= 2160 && fps >= 60) {
+            when (codec) {
+                OutputCodec.HEVC -> requestedBitrate.coerceIn(10_000_000, 40_000_000)
+                OutputCodec.H264 -> requestedBitrate.coerceIn(14_000_000, 50_000_000)
+                else -> requestedBitrate
+            }
+        } else requestedBitrate
+
         return StreamConfig(
             service = StreamService.YOUTUBE,
             protocol = protocol,
@@ -125,7 +142,7 @@ class YouTubeBroadcastPickerViewModel @Inject constructor(
             outputWidth = width,
             outputHeight = height,
             fps = fps,
-            bitrate = video.videoBitrateKbps * 1_000,
+            bitrate = youtubeBitrate,
             audioBitrate = video.audioBitrateKbps * 1_000
         )
     }

@@ -561,7 +561,11 @@ void GlCompositor::captureTransitionSnapshot(const std::vector<SourceLayer>& lay
         std::map<std::string,Geo> from;for(const auto& [n,o]:pairs){auto it=geo.find(o);if(it!=geo.end())from[n]=it->second;}
         std::lock_guard<std::mutex>lk(m_);moveFrom_=std::move(from);
     }else{
-        drawTextureFull(canvasTex_,w,h,w,h,drawOutput_,drawOutput_);
+        // The transition buffers use the same top-down row convention as drawLayers(..., true). Do not use
+        // drawTextureFull here: its window-copy shader intentionally flips Y for a display surface, which leaves
+        // an FBO snapshot upside down and can also sample an empty canvas on the first transition before canvasTex_ exists.
+        glClearColor(0,0,0,0);glClear(GL_COLOR_BUFFER_BIT);
+        drawLayers(layers,std::string(),w,h,true);
         glEnable(GL_BLEND);glBlendFuncSeparate(GL_SRC_ALPHA,GL_ONE_MINUS_SRC_ALPHA,GL_ONE,GL_ONE_MINUS_SRC_ALPHA);
     }
     glClearColor(0,0,0,1);

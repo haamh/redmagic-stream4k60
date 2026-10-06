@@ -5,7 +5,29 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.*
 import java.net.HttpURLConnection
+import timber.log.Timber
 import java.net.URL
+
+data class YouTubeStreamIssue(
+    val type:String,
+    val severity:String,
+    val reason:String,
+    val description:String
+)
+
+data class YouTubeStreamHealth(
+    val streamStatus:String?,
+    val healthStatus:String?,
+    val lastUpdateTimeSeconds:Long?,
+    val issues:List<YouTubeStreamIssue>
+){
+    val fatal:Boolean get()=issues.any{it.severity.equals("error",true)}
+    fun summary():String = buildList {
+        streamStatus?.let{add("streamStatus=${it}")}
+        healthStatus?.let{add("health=${it}")}
+        issues.forEach { add("${it.severity}:${it.type}: ${it.description}") }
+    }.joinToString(" | ").ifBlank{"no health data"}
+}
 
 @kotlinx.serialization.Serializable
 data class YouTubeBroadcast(val id:String,val title:String,val scheduledStart:String?,val lifeCycle:String?,val streamId:String?,val streamStatus:String?,val ingestionType:String?,val ingestionUrl:String?,val rtmpsUrl:String?,val backupUrl:String?,val streamName:String?,val thumbnail:String?,val latency:String?=null)
@@ -37,11 +59,36 @@ class YouTubeService(private val accessTokenProvider:suspend ()->String?) {
         val b=get("https://www.googleapis.com/youtube/v3/liveBroadcasts?part=status,contentDetails&id=$id",token)["items"]?.jsonArray?.firstOrNull()?.jsonObject?:error("YouTube can't find this broadcast any more")
         b["status"]?.jsonObject?.get("lifeCycleStatus")?.jsonPrimitive?.contentOrNull to b["contentDetails"]?.jsonObject?.get("boundStreamId")?.jsonPrimitive?.contentOrNull
     }
-    /** streamStatus of one stream: "active" once YouTube is receiving video on it. */
-    suspend fun streamStatus(streamId:String):String? = withContext(Dispatchers.IO){
+    /** Full ingest/health status returned by YouTube. RTMP itself does not reliably carry these media-validation errors. */
+    suspend fun streamHealth(streamId:String):YouTubeStreamHealth = withContext(Dispatchers.IO){
         val token=accessTokenProvider()?:error("YouTube account is not connected")
-        get("https://www.googleapis.com/youtube/v3/liveStreams?part=status&id=$streamId",token)["items"]?.jsonArray?.firstOrNull()?.jsonObject?.get("status")?.jsonObject?.get("streamStatus")?.jsonPrimitive?.contentOrNull
+        val stream=get("https://www.googleapis.com/youtube/v3/liveStreams?part=status&id=${streamId}",token)["items"]?.jsonArray?.firstOrNull()?.jsonObject
+            ?: error("YouTube can't find the bound live stream $streamId")
+        val status=stream["status"]?.jsonObject ?: JsonObject(emptyMap())
+        val health=status["healthStatus"]?.jsonObject
+        val issues=health?.get("configurationIssues")?.jsonArray?.mapNotNull { element ->
+            val x=element.jsonObject
+            val type=x["type"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+            YouTubeStreamIssue(
+                type=type,
+                severity=x["severity"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+                reason=x["reason"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+                description=x["description"]?.jsonPrimitive?.contentOrNull.orEmpty()
+            )
+        }.orEmpty()
+        YouTubeStreamHealth(
+            streamStatus=status["streamStatus"]?.jsonPrimitive?.contentOrNull,
+            healthStatus=health?.get("status")?.jsonPrimitive?.contentOrNull,
+            lastUpdateTimeSeconds=health?.get("lastUpdateTimeSeconds")?.jsonPrimitive?.longOrNull,
+            issues=issues
+        )
     }
+
+    /** streamStatus of one stream: "active" once YouTube is receiving data via the bound ingest stream. */
+    suspend fun streamStatus(streamId:String):String? = streamHealth(streamId).streamStatus
+
+    private suspend fun ingestHealthSummary(streamId:String):String =
+        runCatching { streamHealth(streamId).summary() }.getOrElse { it.message ?: "health status unavailable" }
     /**
      * Takes a broadcast live (OBS's "Start broadcast"), separate from sending video: waits until YouTube receives the
      * stream, passes through "testing" when the broadcast has a preview (monitor) stream, then goes "live". A broadcast
@@ -53,8 +100,19 @@ class YouTubeService(private val accessTokenProvider:suspend ()->String?) {
         if(life=="complete"||life=="revoked")error("this broadcast has ended; pick or schedule another one in Manage Broadcast")
         streamId?:error("no stream is attached to this broadcast yet: open it once in YouTube Studio")
         var receiving=false
-        for(n in 0 until 30){if(streamIsActive(streamId)){receiving=true;break};kotlinx.coroutines.delay(1000)}
-        check(receiving){"YouTube isn't receiving your video yet. Start streaming, wait until YouTube Studio shows the preview, then Go Live"}
+        var lastSummary=""
+        for(n in 0 until 30){
+            val health=runCatching{streamHealth(streamId)}.getOrNull()
+            if(health!=null){
+                val summary=health.summary()
+                if(summary!=lastSummary){Timber.d("YouTube ingest: %s",summary);lastSummary=summary}
+                if(health.streamStatus.equals("active",true)){receiving=true;break}
+            }
+            kotlinx.coroutines.delay(1000)
+        }
+        check(receiving) {
+            "YouTube isn't receiving your video yet. ${ingestHealthSummary(streamId)}"
+        }
         if(runCatching{transitionBroadcast(id,"live")}.isFailure){
             // A broadcast with a preview must be "testing" before it can go "live".
             if(broadcastState(id).first!="testing")runCatching{transitionBroadcast(id,"testing")}
